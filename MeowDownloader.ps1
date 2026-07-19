@@ -4,26 +4,26 @@
 $ErrorActionPreference = "Stop"
 
 $tools = @{
-    "1" = @{ Name = "MeowDoomsdayFucker";  Repo = "MeowTonynoh/MeowDoomsdayFucker" }
-    "2" = @{ Name = "MeowResolver";        Repo = "MeowTonynoh/MeowResolver" }
-    "3" = @{ Name = "MeowNovowareFucker";  Repo = "MeowTonynoh/MeowNovowareFucker" }
-    "4" = @{ Name = "MeowClientFucker";    Repo = "MeowTonynoh/MeowClientFucker" }
-    "5" = @{ Name = "MeowImportsChecker";  Repo = "MeowTonynoh/MeowImportsChecker" }
+    "1" = @{ Name = "MeowDoomsdayFucker";  Repo = "MeowTonynoh/MeowDoomsdayFucker"; Tag = "V.1.3" }
+    "2" = @{ Name = "MeowResolver";        Repo = "MeowTonynoh/MeowResolver";       Tag = "MeowResolver" }
+    "3" = @{ Name = "MeowNovowareFucker";  Repo = "MeowTonynoh/MeowNovowareFucker"; Tag = "V2" }
+    "4" = @{ Name = "MeowClientFucker";    Repo = "MeowTonynoh/MeowClientFucker";   Tag = "v1.0" }
+    "5" = @{ Name = "MeowImportsChecker";  Repo = "MeowTonynoh/MeowImportsChecker"; Tag = "MeowImportsChecker" }
 }
 
 $outDir = Join-Path $env:USERPROFILE "Desktop\MeowTools"
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
 
 function Download-LatestRelease {
-    param([string]$Name, [string]$Repo)
+    param([string]$Name, [string]$Repo, [string]$Tag)
 
-    Write-Host "[*] Checking latest release for $Name..." -ForegroundColor Cyan
-    $apiUrl = "https://api.github.com/repos/$Repo/releases/latest"
+    Write-Host "[*] Fetching release '$Tag' for $Name..." -ForegroundColor Cyan
+    $apiUrl = "https://api.github.com/repos/$Repo/releases/tags/$Tag"
 
     try {
         $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "MeowDownloader" }
     } catch {
-        Write-Host "[!] No release found for $Name (or API error), skipping." -ForegroundColor Yellow
+        Write-Host "[!] Release '$Tag' not found for $Name (or API error), skipping." -ForegroundColor Yellow
         return
     }
 
@@ -70,7 +70,7 @@ do {
     switch ($choice) {
         "6" {
             foreach ($key in ($tools.Keys | Sort-Object)) {
-                Download-LatestRelease -Name $tools[$key].Name -Repo $tools[$key].Repo
+                Download-LatestRelease -Name $tools[$key].Name -Repo $tools[$key].Repo -Tag $tools[$key].Tag
             }
         }
         "7" {
@@ -81,7 +81,7 @@ do {
         }
         default {
             if ($tools.ContainsKey($choice)) {
-                Download-LatestRelease -Name $tools[$choice].Name -Repo $tools[$choice].Repo
+                Download-LatestRelease -Name $tools[$choice].Name -Repo $tools[$choice].Repo -Tag $tools[$choice].Tag
             } else {
                 Write-Host "[!] Invalid option." -ForegroundColor Red
             }
