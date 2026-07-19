@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"   
+$ProgressPreference = "SilentlyContinue"
 
 $tools = @{
     "1" = @{ Name = "MeowDoomsdayFucker";  Repo = "MeowTonynoh/MeowDoomsdayFucker"; Tag = "V.1.3" }
@@ -14,10 +14,11 @@ if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out
 
 function Download-AllParallel {
     $jobs = @()
+    $total = $tools.Count
 
     foreach ($key in ($tools.Keys | Sort-Object)) {
         $t = $tools[$key]
-        $jobs += Start-Job -ScriptBlock {
+        $job = Start-Job -ScriptBlock {
             param($Name, $Repo, $Tag, $OutDir)
 
             $ProgressPreference = "SilentlyContinue"
@@ -26,11 +27,11 @@ function Download-AllParallel {
             try {
                 $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "MeowDownloader" }
             } catch {
-                return "[!] Release '$Tag' not found for $Name, skipped."
+                return "[!] $Name : release '$Tag' not found, skipped."
             }
 
             if (-not $release.assets -or $release.assets.Count -eq 0) {
-                return "[!] $Name has no assets, skipped."
+                return "[!] $Name : no assets, skipped."
             }
 
             $toolDir = Join-Path $OutDir $Name
@@ -43,16 +44,42 @@ function Download-AllParallel {
 
             return "[OK] $Name downloaded to: $toolDir"
         } -ArgumentList $t.Name, $t.Repo, $t.Tag, $outDir
+
+        $job | Add-Member -NotePropertyName ToolName -NotePropertyValue $t.Name
+        $jobs += $job
     }
 
-    Write-Host "[*] Downloading all tools in parallel..." -ForegroundColor Cyan
-    $jobs | Wait-Job | ForEach-Object {
-        $result = Receive-Job -Job $_
-        foreach ($line in $result) {
-            if ($line -like "[!]*") { Write-Host $line -ForegroundColor Yellow }
-            else { Write-Host $line -ForegroundColor Green }
+    $spinner = @("|", "/", "-", "\")
+    $frameIndex = 0
+    $done = 0
+    $reported = @{}
+    $log = @()
+
+    while ($done -lt $total) {
+        $spin = $spinner[$frameIndex % $spinner.Length]
+        $frameIndex++
+
+        $finishedJobs = $jobs | Where-Object { $_.State -ne "Running" -and -not $reported.ContainsKey($_.Id) }
+
+        foreach ($fj in $finishedJobs) {
+            $result = Receive-Job -Job $fj
+            $done++
+            $reported[$fj.Id] = $true
+            $log += @{ Name = $fj.ToolName; Result = $result }
         }
+
+        Write-Host "`r[$spin] Downloading tools: $done / $total" -ForegroundColor Yellow -NoNewline
+        if ($done -lt $total) { Start-Sleep -Milliseconds 150 }
     }
+
+    Write-Host "`r$(' ' * 60)`r" -NoNewline
+
+    foreach ($entry in $log) {
+        $color = if ($entry.Result -like "[!]*") { "DarkYellow" } else { "Green" }
+        Write-Host ("> {0, -25}" -f $entry.Name) -ForegroundColor $color -NoNewline
+        Write-Host "$($entry.Result)" -ForegroundColor Gray
+    }
+
     $jobs | Remove-Job
 }
 
