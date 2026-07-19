@@ -13,10 +13,12 @@ $outDir = Join-Path $env:USERPROFILE "Desktop\MeowTools"
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
 
 function Write-Centered {
-    param([string]$Text)
-    $width = $Host.UI.RawUI.WindowSize.Width
-    if (-not $width -or $width -le 0) { $width = 80 }
-    $pad = [Math]::Max(0, [Math]::Floor(($width - $Text.Length) / 2))
+    param([string]$Text, [int]$Width = 0)
+    if ($Width -le 0) {
+        $Width = $Host.UI.RawUI.WindowSize.Width
+        if (-not $Width -or $Width -le 0) { $Width = 80 }
+    }
+    $pad = [Math]::Max(0, [Math]::Floor(($Width - $Text.Length) / 2))
     Write-Host ((" " * $pad) + $Text)
 }
 
@@ -88,8 +90,9 @@ function Download-AllParallel {
         Write-Host "$($entry.Result)" -ForegroundColor Gray
     }
 
+    $blockWidth = ($log | ForEach-Object { ("> {0, -25}{1}" -f $_.Name, $_.Result).Length } | Measure-Object -Maximum).Maximum
     Write-Host ""
-    Write-Centered "Tools saved in: $outDir"
+    Write-Centered "Tools saved in: $outDir" -Width $blockWidth
 
     $jobs | Remove-Job
 }
@@ -121,9 +124,10 @@ function Download-LatestRelease {
         Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $destPath -Headers @{ "User-Agent" = "MeowDownloader" }
     }
 
-    Write-Host "[OK] $Name downloaded" -ForegroundColor Green
+    $okLine = "[OK] $Name downloaded"
+    Write-Host $okLine -ForegroundColor Green
     Write-Host ""
-    Write-Centered "Saved in: $toolDir"
+    Write-Centered "Saved in: $toolDir" -Width $okLine.Length
 }
 
 function Run-MeowModAnalyzer {
