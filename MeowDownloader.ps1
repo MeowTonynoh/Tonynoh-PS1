@@ -1,7 +1,5 @@
-# MeowDownloader.ps1
-# Downloader for MeowTonynoh tools - fetches latest GitHub releases
-
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"   
 
 $tools = @{
     "1" = @{ Name = "MeowDoomsdayFucker";  Repo = "MeowTonynoh/MeowDoomsdayFucker"; Tag = "V.1.3" }
@@ -13,6 +11,50 @@ $tools = @{
 
 $outDir = Join-Path $env:USERPROFILE "Desktop\MeowTools"
 if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
+
+function Download-AllParallel {
+    $jobs = @()
+
+    foreach ($key in ($tools.Keys | Sort-Object)) {
+        $t = $tools[$key]
+        $jobs += Start-Job -ScriptBlock {
+            param($Name, $Repo, $Tag, $OutDir)
+
+            $ProgressPreference = "SilentlyContinue"
+            $apiUrl = "https://api.github.com/repos/$Repo/releases/tags/$Tag"
+
+            try {
+                $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "MeowDownloader" }
+            } catch {
+                return "[!] Release '$Tag' not found for $Name, skipped."
+            }
+
+            if (-not $release.assets -or $release.assets.Count -eq 0) {
+                return "[!] $Name has no assets, skipped."
+            }
+
+            $toolDir = Join-Path $OutDir $Name
+            if (-not (Test-Path $toolDir)) { New-Item -ItemType Directory -Path $toolDir | Out-Null }
+
+            foreach ($asset in $release.assets) {
+                $destPath = Join-Path $toolDir $asset.name
+                Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $destPath -Headers @{ "User-Agent" = "MeowDownloader" }
+            }
+
+            return "[OK] $Name downloaded to: $toolDir"
+        } -ArgumentList $t.Name, $t.Repo, $t.Tag, $outDir
+    }
+
+    Write-Host "[*] Downloading all tools in parallel..." -ForegroundColor Cyan
+    $jobs | Wait-Job | ForEach-Object {
+        $result = Receive-Job -Job $_
+        foreach ($line in $result) {
+            if ($line -like "[!]*") { Write-Host $line -ForegroundColor Yellow }
+            else { Write-Host $line -ForegroundColor Green }
+        }
+    }
+    $jobs | Remove-Job
+}
 
 function Download-LatestRelease {
     param([string]$Name, [string]$Repo, [string]$Tag)
@@ -69,9 +111,7 @@ do {
 
     switch ($choice) {
         "6" {
-            foreach ($key in ($tools.Keys | Sort-Object)) {
-                Download-LatestRelease -Name $tools[$key].Name -Repo $tools[$key].Repo -Tag $tools[$key].Tag
-            }
+            Download-AllParallel
         }
         "7" {
             Run-MeowModAnalyzer
