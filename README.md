@@ -21,6 +21,8 @@ agents, redirected game jars, external DLLs and hidden mods.
 | **Launch profile detection** | Shows Vanilla / Fabric / Quilt / Forge-NeoForge from the command line |
 | **Mods inventory** | Scans all known launcher instances (Modrinth, CurseForge, Prism, MultiMC, ATLauncher, .minecraft…) with per-jar SHA256 |
 | **Disguise detection** | Flags jars named like system files (`SYSTEM32.jar`, `svchost.jar`…) |
+| **Crack/cheat marker scan** | Scans the class strings of **every** mod jar for crack signatures (`cracked by`, `648k`, `license key`, `hwid`, `keyauth`) → **CRITICAL**. Catches cracked premium clients hiding under legit names |
+| **Mod identity check** | For flagged jars reads `fabric.mod.json`: shows what the jar *claims* to be (id/name/version/entrypoints), flags **file-name ↔ mod-id mismatch** and hidden nested containers (`MC Bootstrap`, `OptLib Core`…) |
 | **Cheat keyword scan** | Names of known clients/features in args, classpath and mod filenames (a hit = *verify*, never proof) |
 | **Risk verdict** | `CLEAN` / `REVIEW` / `SUSPICIOUS` with critical/warning/info counters |
 | **Report export** | `-OutFile report.txt` (plain) or `-OutFile report.html` (styled standalone HTML, colors preserved) |
