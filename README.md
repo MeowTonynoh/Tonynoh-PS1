@@ -1,4 +1,4 @@
-# JVM Inspector — Minecraft Screenshare Forensics
+# JVM Inspector v3 — Minecraft Screenshare Forensics
 
 PowerShell tool for Minecraft screenshare (SS) checks: scans every running
 `javaw.exe` / `java.exe` process for suspicious JVM launch flags, injected
@@ -6,6 +6,14 @@ agents, redirected game jars, external DLLs and hidden mods.
 
 > Original script by **Tonynoh** — discord.gg/ssa
 > This fork adds deep analysis, validation and reporting — by **ItzMeow80**
+
+## What's new in v3
+
+| Check | Details |
+|---|---|
+| **Generic cheat flags** | The class strings of **every** mod jar are matched against ~90 cheat module/feature names (Kill Aura, Auto Crystal, Auto Totem, Chest Stealer, Player ESP, X-Ray, Ping Spoof, USN Journal Cleaner…) **regardless of the client** — works on unknown/private clients too. Case-insensitive, tolerates `Kill Aura` / `killaura` / `kill-aura`. Hits print the class + surrounding string as evidence → **`[ WARNING ]`** (*verify, never proof*) |
+| **String dump** | `-DumpStrings <jar>` exports every readable string of a jar (`entry<TAB>string` per line) to `%TEMP%\<name>.strings.txt` for manual analysis |
+| **MEOW-style output** | Numbered section banners `[ 01 ] … [ 05 ]`, `[ TAG ]` severity labels (`[ CRITICAL ]`, `[ REVIEW ]`, `[ MISMATCH ]`, `[ OK ]`), box separators and a final `[ VERDICT ]` box — HTML report restyled with the MEOW accent `#00FFB3` |
 
 ## What's new in v2
 
@@ -22,12 +30,10 @@ agents, redirected game jars, external DLLs and hidden mods.
 | **Mods inventory** | Scans all known launcher instances (Modrinth, CurseForge, Prism, MultiMC, ATLauncher, .minecraft…) with per-jar SHA256 |
 | **Disguise detection** | Flags jars named like system files (`SYSTEM32.jar`, `svchost.jar`…) |
 | **Crack/cheat marker scan** | Scans the class strings of **every** mod jar for crack signatures (`cracked by`, `648k`, `license key`, `hwid`, `keyauth`) with word boundaries → **CRITICAL**. Catches cracked premium clients hiding under legit names |
-| **Generic cheat flags** | The class strings of **every** mod jar are matched against ~90 cheat module/feature names (Kill Aura, Auto Crystal, Auto Totem, Chest Stealer, Player ESP, X-Ray, Ping Spoof, USN Journal Cleaner…) **regardless of the client** — works on unknown/private clients too. Case-insensitive, tolerates `Kill Aura` / `killaura` / `kill-aura`. Hits print the class + surrounding string as evidence → **WARNING** (*verify, never proof*) |
 | **Mod identity check** | For flagged jars reads `fabric.mod.json`: shows what the jar *claims* to be (id/name/version/entrypoints), flags **file-name ↔ mod-id mismatch** and hidden nested containers (`MC Bootstrap`, `OptLib Core`…) |
 | **Cheat keyword scan** | Names of known clients/features in args, classpath and mod filenames (a hit = *verify*, never proof) |
 | **Risk verdict** | `CLEAN` / `REVIEW` / `SUSPICIOUS` with critical/warning/info counters |
 | **Report export** | `-OutFile report.txt` (plain) or `-OutFile report.html` (styled standalone HTML, colors preserved) |
-| **String dump** | `-DumpStrings <jar>` exports every readable string of a jar (`entry<TAB>string` per line) to `%TEMP%\<name>.strings.txt` for manual analysis |
 
 ## Usage
 
@@ -52,10 +58,13 @@ Run **as Administrator** for the parent-process and loaded-DLL checks.
 
 ## Reading the output
 
-- **Red (Critical)** — needs explanation: unknown java agent, self-attach enabled, missing/Downloads path, injected DLL…
-- **Yellow (Warning)** — verify by hand: custom mod paths, tweaked game jar, keyword hits, disguised jar names
-- **Cyan (Info)** — normal but documented: launcher-owned native paths, launch target
-- **Green (OK)** — validated as legitimate (known launcher agent/folder)
+Sections are numbered `[ 01 ] … [ 05 ]` and every finding carries a tag:
+
+- **`[ CRITICAL ]` (Red)** — needs explanation: unknown java agent, self-attach enabled, missing/Downloads path, injected DLL, crack marker…
+- **`[ WARNING ]` / `[ REVIEW ]` / `[ MISMATCH ]` / `[ ! ]` (Yellow)** — verify by hand: custom mod paths, tweaked game jar, keyword hits, disguised jar names, generic cheat flags
+- **`[ INFO ]` (Cyan)** — normal but documented: launcher-owned native paths, launch target
+- **`[ OK ]` (Green)** — validated as legitimate (known launcher agent/folder, clean env, clean persistence)
+- **`[ VERDICT ]` box** — final call: `CLEAN` / `REVIEW` / `SUSPICIOUS` with the counters
 
 A keyword or a red flag is **never proof by itself** — it only tells the
 reviewer where to look. Always open the jar / check the folder to conclude.
