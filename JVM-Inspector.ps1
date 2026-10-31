@@ -895,7 +895,15 @@ function Show-ModsInventory {
             $kw = Find-BadKeyword $jar.Name
             $baseName = [System.IO.Path]::GetFileNameWithoutExtension($jar.Name)
             $isDisguised = ($script:DisguisedNames -contains $baseName)
-            $isFlagged = ($kw -or $isDisguised)
+
+            # string scan FIRST (crack markers + cheat module strings, EVERY jar):
+            # the result decides the color of the jar line below - a jar with
+            # cheat-flag hits gets its name printed in RED (mini flag)
+            $hits      = Find-JarStringHits -JarPath $jar.FullName
+            $hasMarker = ($hits.Markers.Count -gt 0)
+            $hasCheat  = ($hits.Cheats.Count -gt 0)
+            $isFlagged = ($kw -or $isDisguised -or $hasMarker -or $hasCheat)
+
             $hashTxt = ''
             if ($Hash -or $isFlagged) {
                 try {
@@ -905,23 +913,28 @@ function Show-ModsInventory {
                 catch { $hashTxt = '  [ sha256: <unreadable> ]' }
             }
             $line = '      {0}   ( {1} KB, {2:yyyy-MM-dd} ){3}' -f $jar.Name, [int]($jar.Length / 1KB), $jar.LastWriteTime, $hashTxt
-            if ($kw) {
-                $script:WarningCount++
-                Write-Result ('[ ! ] ' + $line.TrimStart()) Yellow
-                Write-Result "          -> keyword '$kw' matched - open and verify this jar" Yellow
+
+            if ($kw)        { $script:WarningCount++ }
+            elseif ($isDisguised) { $script:WarningCount++ }
+
+            if ($hasMarker -or $hasCheat) {
+                # mini flag / crack marker -> jar line in RED
+                Write-Result ('[ ! ] ' + $line.TrimStart()) Red
             }
-            elseif ($isDisguised) {
-                $script:WarningCount++
+            elseif ($kw -or $isDisguised) {
                 Write-Result ('[ ! ] ' + $line.TrimStart()) Yellow
-                Write-Result '          -> jar disguised as a system/process file name - verify this jar' Yellow
             }
             else {
                 Write-Result $line DarkGray
             }
+            if ($kw) {
+                Write-Result "          -> keyword '$kw' matched - open and verify this jar" Yellow
+            }
+            if ($isDisguised) {
+                Write-Result '          -> jar disguised as a system/process file name - verify this jar' Yellow
+            }
 
-            # string scan: crack markers + cheat module strings (EVERY jar)
-            $hits = Find-JarStringHits -JarPath $jar.FullName
-            if ($hits.Markers.Count -gt 0) {
+            if ($hasMarker) {
                 $script:Critical++
                 Write-Result '          [ CRITICAL ] crack/cheat marker(s) found inside class strings:' Red
                 foreach ($mk in $hits.Markers) {
