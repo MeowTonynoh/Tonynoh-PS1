@@ -14,14 +14,16 @@ agents, redirected game jars, external DLLs and hidden mods.
 | **Deep `-javaagent` analysis** | Reads `MANIFEST.MF` (Premain-Class) and class packages directly from the jar and matches them against known legitimate launcher agents (e.g. **Modrinth App "Theseus"**) → no more false alarms |
 | **Path validation** | Every value of `addMods`, `gameJarPath`, `java.library.path`, `jna.boot.library.path`… is checked: does it exist? Is it inside a known launcher folder? TEMP? Downloads? |
 | **Parent process check** | Who spawned `javaw.exe`? A launcher = OK, an unknown exe from TEMP/Downloads = injection suspect |
-| **Loaded-DLL check** | Lists DLLs of the JVM process; flags anything loaded from TEMP/Downloads (classic injection) |
+| **Loaded-DLL check** | Lists DLLs of the JVM process; flags anything loaded from TEMP/Downloads (classic injection) and marks every external DLL as **signed / unsigned** |
+| **Startup persistence** | Flags Run-key / Startup-folder entries that auto-launch `java`/`javaw`/agents or point into TEMP |
+| **Attach tool detection** | Warns when `jcmd`/`jdb`/`jattach`/`jconsole` are running — they can inject agents into a live JVM |
 | **Environment persistence** | Detects `JAVA_TOOL_OPTIONS` / `_JAVA_OPTIONS` / `JDK_JAVA_OPTIONS` containing agents (affects every JVM on the machine) |
 | **Launch profile detection** | Shows Vanilla / Fabric / Quilt / Forge-NeoForge from the command line |
 | **Mods inventory** | Scans all known launcher instances (Modrinth, CurseForge, Prism, MultiMC, ATLauncher, .minecraft…) with per-jar SHA256 |
 | **Disguise detection** | Flags jars named like system files (`SYSTEM32.jar`, `svchost.jar`…) |
 | **Cheat keyword scan** | Names of known clients/features in args, classpath and mod filenames (a hit = *verify*, never proof) |
 | **Risk verdict** | `CLEAN` / `REVIEW` / `SUSPICIOUS` with critical/warning/info counters |
-| **Report export** | `-OutFile report.txt` saves the full output as screenshare evidence |
+| **Report export** | `-OutFile report.txt` (plain) or `-OutFile report.html` (styled standalone HTML, colors preserved) |
 
 ## Usage
 
@@ -29,8 +31,8 @@ agents, redirected game jars, external DLLs and hidden mods.
 # basic scan
 .\JVM-Inspector.ps1
 
-# full scan with SHA256 hashes + save evidence report
-.\JVM-Inspector.ps1 -Hash -OutFile .\ss-report.txt
+# full scan with SHA256 hashes + styled HTML evidence report
+.\JVM-Inspector.ps1 -Hash -OutFile .\ss-report.html
 
 # check a mods folder that is not in a known launcher path
 .\JVM-Inspector.ps1 -ModsPath "C:\path\to\mods"
