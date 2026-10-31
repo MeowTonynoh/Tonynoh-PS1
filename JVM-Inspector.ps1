@@ -1161,6 +1161,11 @@ Show-EnvFlags
 $processes = @(Get-CimInstance Win32_Process -Filter "name = 'javaw.exe' OR name = 'java.exe'")
 if (-not $processes) {
     Write-Result 'No javaw.exe / java.exe process found.' Yellow
+    if (-not $SkipModules) {
+        Write-Result '  -> loaded-DLL check (TEMP/Downloads injection suspect), javaagent flags,' Yellow
+        Write-Result '     parent process and launch profile only run on LIVE processes:' Yellow
+        Write-Result '     START THE GAME (suspect client), keep it running, then scan again.' Yellow
+    }
 }
 else {
     $processLabel = if ($processes.Count -eq 1) { 'process' } else { 'processes' }
