@@ -14,7 +14,7 @@ agents, redirected game jars, external DLLs and hidden mods.
 | **Deep `-javaagent` analysis** | Reads `MANIFEST.MF` (Premain-Class) and class packages directly from the jar and matches them against known legitimate launcher agents (e.g. **Modrinth App "Theseus"**) → no more false alarms |
 | **Path validation** | Every value of `addMods`, `gameJarPath`, `java.library.path`, `jna.boot.library.path`… is checked: does it exist? Is it inside a known launcher folder? TEMP? Downloads? |
 | **Parent process check** | Who spawned `javaw.exe`? A launcher = OK, an unknown exe from TEMP/Downloads = injection suspect |
-| **Loaded-DLL check** | Lists DLLs of the JVM process; flags anything loaded from TEMP/Downloads (classic injection) and marks every external DLL as **signed / unsigned** |
+| **Loaded-DLL check** | Lists DLLs of the JVM process; flags anything loaded from TEMP/Downloads (classic injection) and marks every external DLL as **signed / unsigned**. Known false positives are filtered: natives extracted to TEMP by **Simple Voice Chat** (`libopus4j`, `librnnoise4j`, `libspeex4j`, `liblame4j`) and **JNA** (`jnidispatch`) are reported as normal |
 | **Startup persistence** | Flags Run-key / Startup-folder entries that auto-launch `java`/`javaw`/agents or point into TEMP |
 | **Attach tool detection** | Warns when `jcmd`/`jdb`/`jattach`/`jconsole` are running — they can inject agents into a live JVM |
 | **Environment persistence** | Detects `JAVA_TOOL_OPTIONS` / `_JAVA_OPTIONS` / `JDK_JAVA_OPTIONS` containing agents (affects every JVM on the machine) |
