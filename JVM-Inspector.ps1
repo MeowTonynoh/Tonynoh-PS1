@@ -418,6 +418,7 @@ function Get-ParentInfo {
         Name       = ''
         Path       = ''
         IsKnown    = $false
+        Kind       = ''
         Suspicious = $false
         Note       = ''
     }
@@ -430,14 +431,18 @@ function Get-ParentInfo {
 
     $info.Name = $parent.Name
     $info.Path = $parent.ExecutablePath
-    $knownParents = @(
-        'explorer.exe', 'powershell.exe', 'pwsh.exe', 'cmd.exe', 'windowsterminal.exe',
-        'openconsole.exe', 'conhost.exe', 'modrinth app.exe', 'curseforge.exe',
-        'minecraftlauncher.exe', 'minecraft.exe', 'prismlauncher.exe', 'multimc.exe',
-        'atlauncher.exe', 'gdlauncher.exe', 'javaw.exe', 'java.exe', 'techniclauncher.exe',
-        'serverlauncher.exe', 'steam.exe'
+    $launcherParents = @(
+        'modrinth app.exe', 'curseforge.exe', 'minecraftlauncher.exe', 'minecraft.exe',
+        'prismlauncher.exe', 'multimc.exe', 'atlauncher.exe', 'gdlauncher.exe',
+        'techniclauncher.exe', 'serverlauncher.exe', 'steam.exe', 'javaw.exe', 'java.exe'
     )
-    if ($info.Name -and ($knownParents -contains $info.Name.ToLowerInvariant())) { $info.IsKnown = $true }
+    $consoleParents = @(
+        'explorer.exe', 'powershell.exe', 'pwsh.exe', 'cmd.exe',
+        'windowsterminal.exe', 'openconsole.exe', 'conhost.exe'
+    )
+    $lowerName = "$($info.Name)".ToLowerInvariant()
+    if ($launcherParents -contains $lowerName) { $info.IsKnown = $true; $info.Kind = 'launcher' }
+    elseif ($consoleParents -contains $lowerName) { $info.IsKnown = $true; $info.Kind = 'console' }
     if ($info.Path) {
         foreach ($r in ($script:TempRoots + $script:DownloadRoots)) {
             if (Test-IsWithin $info.Path $r) { $info.Suspicious = $true }
@@ -980,7 +985,8 @@ function Show-ProcessReport {
         Write-Result "    [ CRITICAL ] Parent: $($parent.Name) ( PID $($parent.Pid) ) launched FROM TEMP/DOWNLOADS - injection suspect" Red
     }
     elseif ($parent.IsKnown) {
-        Write-Result "    Parent         : $($parent.Name)   [ OK ] ( known launcher/console )" DarkGray
+        $parentKind = if ($parent.Kind -eq 'console') { 'trusted console' } else { 'trusted launcher' }
+        Write-Result "    Parent         : $($parent.Name)   [ OK ] ( $parentKind )" DarkGray
     }
     elseif ($parent.Note) {
         Write-Result "    Parent         : $($parent.Note)" DarkGray
@@ -1158,9 +1164,8 @@ Write-Result '   ( original: Tonynoh - discord.gg/ssa )   ( fork & improvements:
 Write-Result '[ ================================================================== ]' Green
 Write-Result ''
 Write-Result '  Tool      :  JVM Inspector v3 ( forensics build )' DarkCyan
-Write-Result '  Vectors   :  Disk  .  Process  .  Memory  .  Strings  .  Persistence' DarkCyan
 if (Test-IsAdmin) {
-    Write-Result '  Elevation :  [ ADMIN ] ( full access )' Green
+    Write-Result '  Elevation :  [ ADMIN ]' Green
 }
 else {
     Write-Result '  Elevation :  [ NO-ADMIN ] ( run as Administrator for DLL & parent checks )' Yellow
