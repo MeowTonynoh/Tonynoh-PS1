@@ -34,6 +34,9 @@
     Add short SHA256 hashes to the mods inventory (proves which jar was there).
 .EXAMPLE
     .\JVM-Inspector.ps1 -OutFile .\ss-report.txt -Hash
+.EXAMPLE
+    .\JVM-Inspector.ps1 -DumpStrings "C:\path\to\suspect.jar"
+    Dump every readable string of a jar to %TEMP%\<name>.strings.txt for manual analysis.
 .NOTES
     Original by Tonynoh - discord.gg/ssa
     Fork + improvements by ItzMeow80
@@ -45,7 +48,8 @@ param(
     [string]$ModsPath,
     [switch]$SkipMods,
     [switch]$SkipModules,
-    [switch]$Hash
+    [switch]$Hash,
+    [string]$DumpStrings
 )
 
 # ----------------------------------------------------------------------
@@ -650,29 +654,123 @@ function Get-ModsDirectories {
     return @($found.Values | Sort-Object)
 }
 
-# Crack / cheat markers: strings commonly found inside cracked or pirated
-# clients ("Cracked by <cracker>", license/auth scaffolding, HWID checks).
-# A hit inside class constant-pools is a strong cheat indicator.
-function Find-JarMarkers {
+# String scan inside class constant-pools (single pass over every jar):
+#  - Crack markers  -> Critical   ("Cracked by <cracker>", license/HWID scaffolding)
+#  - Cheat strings  -> Warning    (module/feature names typical of cheat clients,
+#                                  generic flags that work on ANY client - private
+#                                  ones included. Verify, never proof.)
+function Find-JarStringHits {
     param([string]$JarPath)
-    $markers = @('cracked by', 'crackedby', 'crack by', '648k', 'license key', 'keyauth', 'hwid')
-    $found   = @{}   # marker -> first class file that contains it
+
+    # Regexes built once (script scope) for speed:
+    #  - markers get word boundaries -> 'hwid' no longer matches inside 'withWidth'
+    #  - cheat phrases tolerate spaces / underscores / hyphens
+    #    (killaura = Kill Aura = kill-aura = Kill_Aura); end guard (?!\p{Ll})
+    #    keeps 'ClickGuiManager' matching but 'hudx' out.
+    if (-not $script:CheatRx) {
+        $markers = @('cracked by', 'crackedby', 'crack by', '648k', 'license key', 'keyauth', 'hwid')
+        $script:MarkerRx = @{}
+        foreach ($mk in $markers) {
+            $script:MarkerRx[$mk] = [regex]::new(
+                '(?<![0-9A-Za-z])' + [regex]::Escape($mk) + '(?![0-9A-Za-z])',
+                [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+        $words = @(
+            # combat
+            'kill aura','crystal aura','mace aura','silent mace','aim assist','silent aim',
+            'bow aimbot','triggerbot','anti weakness','fake punch','damage tick','only crit',
+            'static hitbox','shield disabler','anti invis','w tap'
+            # crystal / anchor pvp
+            'auto crystal','crystal optimizer','cw crystal','double anchor','anchor exploder',
+            'auto dtap','marlow anchor','anti anti cw','auto hit crystal'
+            # totem
+            'auto totem','totem offhand','hover totem','force totem','auto retotem',
+            'inventorytotemlegit','auto double hand'
+            # movement
+            'fast bridge','bridge assist','fast swim','fast place','no break delay',
+            'no jump delay','elytra swap','elytra glide','jetpack','auto sprint','inventory move'
+            # utility / automation
+            'auto clicker','auto pot','auto eat','auto xp','auto armor','auto tool','auto mine',
+            'chest steal','shulker dropper','auto sell','cord snapper','key pearl','auto tpa',
+            'bed macro','auto restock','replace mod'
+            # esp / vision
+            'player esp','storage esp','entity esp','esp','x ray','health indicators',
+            'target hud','netherite finder','rtp base finder'
+            # evasion / anticheat bypass
+            'fake lag','ping spoof','pack spoof','stray bypass','donut smp bypass',
+            'anti ss tool','string cleaner','self destruct','usn journal cleaner',
+            'delete usn journal'
+        )
+        $phraseRx = ($words | ForEach-Object {
+            $t = [regex]::Escape($_) -replace '\\\ ', '[\s_-]?'
+            "(?<!\w)$t(?!\p{Ll})"
+        }) -join '|'
+        $script:CheatRx = [regex]::new($phraseRx,
+            [Text.RegularExpressions.RegexOptions]::IgnoreCase -bor
+            [Text.RegularExpressions.RegexOptions]::Compiled)
+
+        # Fast gate: the full regex above costs ~7ms/KB (way too slow to run on
+        # every class), so candidates are pre-filtered with plain IndexOf on a
+        # separator-stripped lowercase copy (kill aura / Kill_Aura / kill-aura
+        # all collapse to 'killaura'). Only classes that pass the gate are run
+        # through the full regex for precise match + boundary checks.
+        $script:CheatGates = @($words |
+            ForEach-Object { $_ -replace '[ _\-]', '' } |
+            Where-Object { $_ -ne 'esp' } | Select-Object -Unique)
+        $script:StripRx = [regex]::new('[ _\-]', [Text.RegularExpressions.RegexOptions]::Compiled)
+    }
+    $markers = @($script:MarkerRx.Keys)
+
+    $foundM = @{}   # marker -> first class file that contains it
+    $foundC = @{}   # matched text -> pscustomobject { Match; Class; Context }
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
         try {
             $enc = [System.Text.Encoding]::GetEncoding(28591)
             foreach ($e in $zip.Entries) {
-                if ($found.Count -ge $markers.Count) { break }
+                if ($foundM.Count -ge $markers.Count -and $foundC.Count -ge 6) { break }
                 if ($e.FullName -notlike '*.class') { continue }
                 $ms = New-Object System.IO.MemoryStream
                 $s  = $e.Open(); $s.CopyTo($ms); $s.Close()
                 $str = $enc.GetString($ms.ToArray())
                 $ms.Dispose()
+                # collapse binary noise: matching runs on printable text only,
+                # this also cuts the regex cost over raw bytecode ~2-3x
+                $clean = [regex]::Replace($str, '[^\x20-\x7E]+', ' ')
+
                 foreach ($mk in $markers) {
-                    if ($found.ContainsKey($mk)) { continue }
-                    if ($str.IndexOf($mk, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                        $found[$mk] = $e.FullName
+                    if ($foundM.ContainsKey($mk)) { continue }
+                    if ($script:MarkerRx[$mk].IsMatch($clean)) {
+                        $foundM[$mk] = $e.FullName
                         break
+                    }
+                }
+
+                if ($foundC.Count -lt 6) {
+                    # gate first (cheap): normalized copy + IndexOf per phrase.
+                    # 'esp' alone is excluded from the phrase gates (it matches
+                    # inside normal words) - standalone ESP is gated separately
+                    # as the uppercase form only, which legit code rarely uses.
+                    $low = $script:StripRx.Replace($clean, '').ToLowerInvariant()
+                    $gate = $clean.IndexOf('ESP', [StringComparison]::Ordinal) -ge 0
+                    if (-not $gate) {
+                        foreach ($g in $script:CheatGates) {
+                            if ($low.IndexOf($g, [StringComparison]::Ordinal) -ge 0) { $gate = $true; break }
+                        }
+                    }
+                    if ($gate) {
+                        foreach ($mt in $script:CheatRx.Matches($clean)) {
+                            $key = $mt.Value.ToLowerInvariant()
+                            if ($foundC.ContainsKey($key)) { continue }
+                            # context around the hit as evidence
+                            $from = [Math]::Max(0, $mt.Index - 40)
+                            $len  = [Math]::Min($clean.Length - $from, $mt.Length + 80)
+                            $ctx  = ($clean.Substring($from, $len) -replace '\s{2,}', ' ').Trim()
+                            $foundC[$key] = [pscustomobject]@{
+                                Match = $mt.Value; Class = $e.FullName; Context = $ctx
+                            }
+                            if ($foundC.Count -ge 6) { break }
+                        }
                     }
                 }
             }
@@ -680,9 +778,39 @@ function Find-JarMarkers {
         finally { $zip.Dispose() }
     }
     catch { }
-    $out = @()
-    foreach ($k in $found.Keys) { $out += [pscustomobject]@{ Marker = $k; Class = $found[$k] } }
-    return $out
+
+    $mOut = @()
+    foreach ($k in $foundM.Keys) { $mOut += [pscustomobject]@{ Marker = $k; Class = $foundM[$k] } }
+    $cOut = @()
+    foreach ($k in $foundC.Keys) { $cOut += $foundC[$k] }
+    return [pscustomobject]@{ Markers = $mOut; Cheats = $cOut }
+}
+
+# Full printable-string dump of a jar (manual analysis aid):
+# every readable run >= 5 chars of every entry, "entry<TAB>string" per line.
+function Export-JarStrings {
+    param([string]$JarPath, [string]$OutPath)
+    $entries = 0; $strings = 0
+    $sb = New-Object System.Text.StringBuilder
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
+    try {
+        $enc = [System.Text.Encoding]::GetEncoding(28591)
+        foreach ($e in $zip.Entries) {
+            if ($e.Length -eq 0 -or $e.Length -gt 20MB) { continue }
+            $entries++
+            $ms = New-Object System.IO.MemoryStream
+            $s  = $e.Open(); $s.CopyTo($ms); $s.Close()
+            $str = $enc.GetString($ms.ToArray())
+            $ms.Dispose()
+            foreach ($mt in [regex]::Matches($str, '[\x20-\x7E]{5,}')) {
+                [void]$sb.AppendLine($e.FullName + "`t" + $mt.Value)
+                $strings++
+            }
+        }
+    }
+    finally { $zip.Dispose() }
+    [System.IO.File]::WriteAllText($OutPath, $sb.ToString(), [System.Text.UTF8Encoding]::new($false))
+    return [pscustomobject]@{ Entries = $entries; Strings = $strings; Path = $OutPath }
 }
 
 # Identity metadata of a mod jar: what the jar CLAIMS to be vs its file name.
@@ -779,15 +907,24 @@ function Show-ModsInventory {
                 Write-Result $line DarkGray
             }
 
-            # crack / cheat markers inside class strings (checked in EVERY jar)
-            $markers = Find-JarMarkers -JarPath $jar.FullName
-            if ($markers.Count -gt 0) {
+            # string scan: crack markers + cheat module strings (EVERY jar)
+            $hits = Find-JarStringHits -JarPath $jar.FullName
+            if ($hits.Markers.Count -gt 0) {
                 $script:Critical++
                 Write-Result '          [CRITICAL] crack/cheat marker(s) found inside class strings:' Red
-                foreach ($mk in $markers) {
+                foreach ($mk in $hits.Markers) {
                     Write-Result "              '$($mk.Marker)'  <- $($mk.Class)" Red
                 }
                 Write-Result '          -> cracked/pirated client = cheat + malware risk - DO NOT RUN' Red
+            }
+            if ($hits.Cheats.Count -gt 0) {
+                $script:WarningCount++
+                Write-Result '          [!] generic cheat flag(s) - module/feature strings inside classes (verify):' Yellow
+                foreach ($ch in $hits.Cheats) {
+                    Write-Result "              '$($ch.Match)'  <- $($ch.Class)" Yellow
+                    Write-Result "                  context: $($ch.Context)" DarkGray
+                }
+                Write-Result '          -> matches cheat module names regardless of client - check this jar' Yellow
             }
 
             # identity deep-dive for flagged jars: what does the jar CLAIM to be?
@@ -1033,6 +1170,29 @@ else {
 }
 
 if (-not $SkipMods) { Show-ModsInventory }
+
+# --- Optional full string dump of a jar (manual analysis) --------------
+if ($DumpStrings) {
+    Write-Result ''
+    Write-Result '================ STRING DUMP ================' Cyan
+    try {
+        $jarFull = (Resolve-Path -LiteralPath $DumpStrings).Path
+        if (Test-Path -LiteralPath $jarFull -PathType Container) {
+            Write-Result "DumpStrings expects a JAR file, not a folder: $jarFull" Red
+        }
+        else {
+            $outPath = Join-Path $env:TEMP (([IO.Path]::GetFileNameWithoutExtension($jarFull)) + '.strings.txt')
+            $d = Export-JarStrings -JarPath $jarFull -OutPath $outPath
+            Write-Result "Dumped $($d.Strings) readable string(s) from $($d.Entries) entrie(s) of:" Gray
+            Write-Result "  $jarFull" Gray
+            Write-Result "  -> $($d.Path)" Green
+            Write-Result '  (strings may contain GUI labels, module names, URLs, tokens - review by hand)' DarkGray
+        }
+    }
+    catch {
+        Write-Result "String dump failed: $($_.Exception.Message)" Red
+    }
+}
 
 # --- Verdict -----------------------------------------------------------
 Write-Result ''
