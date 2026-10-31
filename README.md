@@ -7,6 +7,8 @@ agents, redirected game jars, external DLLs and hidden mods.
 > Original script by **Tonynoh** — discord.gg/ssa
 > This fork adds deep analysis, validation and reporting — by **ItzMeow80**
 
+Full version history: [CHANGELOG.md](CHANGELOG.md)
+
 ## What's new in v3
 
 | Check | Details |
