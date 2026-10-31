@@ -681,6 +681,13 @@ function Find-JarStringHits {
     #    keeps 'ClickGuiManager' matching but 'hudx' out.
     if (-not $script:CheatRx) {
         $markers = @('cracked by', 'crackedby', 'crack by', '648k', 'license key', 'keyauth', 'hwid')
+        # Known cheat CLIENTS: distinctive tokens (asset names / branding) that
+        # survive repackaging - matched against entry paths AND class strings.
+        $script:ClientTokens = @(
+            @{ Token = 'bloom_logo';   Name = 'Bloom Client' }
+            @{ Token = 'bloom client'; Name = 'Bloom Client' }
+            @{ Token = 'bloomclient';  Name = 'Bloom Client' }
+        )
         $script:MarkerRx = @{}
         foreach ($mk in $markers) {
             $script:MarkerRx[$mk] = [regex]::new(
@@ -735,12 +742,22 @@ function Find-JarStringHits {
 
     $foundM = @{}   # marker -> first class file that contains it
     $foundC = @{}   # matched text -> pscustomobject { Match; Class; Context }
+    $foundT = New-Object System.Collections.Generic.List[string]  # detected cheat clients
     try {
         $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
         try {
             $enc = [System.Text.Encoding]::GetEncoding(28591)
             foreach ($e in $zip.Entries) {
                 if ($foundM.Count -ge $markers.Count -and $foundC.Count -ge 6) { break }
+                # known cheat client branding (e.g. assets/.../bloom_logo.png)
+                if ($foundT.Count -lt 3) {
+                    $en = $e.FullName.ToLowerInvariant()
+                    foreach ($ct in $script:ClientTokens) {
+                        if ($en.Contains($ct.Token) -and -not ($foundT -contains $ct.Name)) {
+                            [void]$foundT.Add($ct.Name); break
+                        }
+                    }
+                }
                 if ($e.FullName -notlike '*.class') { continue }
                 $ms = New-Object System.IO.MemoryStream
                 $s  = $e.Open(); $s.CopyTo($ms); $s.Close()
@@ -749,6 +766,16 @@ function Find-JarStringHits {
                 # collapse binary noise: matching runs on printable text only,
                 # this also cuts the regex cost over raw bytecode ~2-3x
                 $clean = [regex]::Replace($str, '[^\x20-\x7E]+', ' ')
+
+                # known cheat client name strings (Bloom Client, ...)
+                if ($foundT.Count -lt 3) {
+                    $cleanLow = $clean.ToLowerInvariant()
+                    foreach ($ct in $script:ClientTokens) {
+                        if ($cleanLow.Contains($ct.Token) -and -not ($foundT -contains $ct.Name)) {
+                            [void]$foundT.Add($ct.Name); break
+                        }
+                    }
+                }
 
                 foreach ($mk in $markers) {
                     if ($foundM.ContainsKey($mk)) { continue }
@@ -795,7 +822,7 @@ function Find-JarStringHits {
     foreach ($k in $foundM.Keys) { $mOut += [pscustomobject]@{ Marker = $k; Class = $foundM[$k] } }
     $cOut = @()
     foreach ($k in $foundC.Keys) { $cOut += $foundC[$k] }
-    return [pscustomobject]@{ Markers = $mOut; Cheats = $cOut }
+    return [pscustomobject]@{ Markers = $mOut; Cheats = $cOut; Clients = @($foundT) }
 }
 
 # Full printable-string dump of a jar (manual analysis aid):
@@ -902,7 +929,8 @@ function Show-ModsInventory {
             $hits      = Find-JarStringHits -JarPath $jar.FullName
             $hasMarker = ($hits.Markers.Count -gt 0)
             $hasCheat  = ($hits.Cheats.Count -gt 0)
-            $isFlagged = ($kw -or $isDisguised -or $hasMarker -or $hasCheat)
+            $hasClient = ($hits.Clients.Count -gt 0)
+            $isFlagged = ($kw -or $isDisguised -or $hasMarker -or $hasCheat -or $hasClient)
 
             $hashTxt = ''
             if ($Hash -or $isFlagged) {
@@ -917,8 +945,8 @@ function Show-ModsInventory {
             if ($kw)        { $script:WarningCount++ }
             elseif ($isDisguised) { $script:WarningCount++ }
 
-            if ($hasMarker -or $hasCheat) {
-                # mini flag / crack marker -> jar line in RED
+            if ($hasMarker -or $hasCheat -or $hasClient) {
+                # cheat client / cheat strings -> jar line in RED
                 Write-Result ('[ ! ] ' + $line.TrimStart()) Red
             }
             elseif ($kw -or $isDisguised) {
@@ -934,10 +962,15 @@ function Show-ModsInventory {
                 Write-Result '          -> jar disguised as a system/process file name - verify this jar' Yellow
             }
 
-            if ($hasMarker) {
+            if ($hits.Clients.Count -gt 0) {
                 $script:Critical++
-                Write-Result "          [ CRITICAL ] Crack/cheat strings found inside this jar ( $($hits.Markers.Count) ):" Red
-                Write-Result '          -> this is a cracked/pirated client = cheat + malware risk - DO NOT RUN' Red
+                Write-Result "          [ CRITICAL ] CHEAT CLIENT detected: $($hits.Clients -join ', ')" Red
+                Write-Result '          -> cheat client hidden inside this jar - malware risk - DO NOT RUN' Red
+            }
+            elseif ($hasMarker) {
+                $script:Critical++
+                Write-Result "          [ CRITICAL ] Cheat strings found inside this jar ( $($hits.Markers.Count) ):" Red
+                Write-Result '          -> cheat/malware strings - DO NOT RUN' Red
             }
             if ($hits.Cheats.Count -gt 0) {
                 $script:WarningCount++
