@@ -22,7 +22,8 @@
       * Risk scoring with a final verdict: CLEAN / REVIEW / SUSPICIOUS
       * Optional text report export (-OutFile) for screenshare evidence
 .PARAMETER OutFile
-    Save the full console output to a text file (evidence for a screenshare).
+    Save the full console output as evidence. ".txt" = plain text,
+    ".html" = styled standalone HTML report (colors preserved).
 .PARAMETER ModsPath
     Extra folder to scan for mods (instances not stored in a known launcher path).
 .PARAMETER SkipMods
@@ -50,7 +51,7 @@ param(
 # ----------------------------------------------------------------------
 # State
 # ----------------------------------------------------------------------
-$script:Report        = [System.Collections.Generic.List[string]]::new()
+$script:Report        = [System.Collections.Generic.List[object]]::new()
 $script:Critical      = 0
 $script:WarningCount  = 0
 $script:InfoCount     = 0
@@ -116,7 +117,7 @@ $script:PathKeys = @(
 function Write-Result {
     param([string]$Text = '', $Color = 'Gray')
     if ($Text -eq '') { Write-Host '' } else { Write-Host $Text -ForegroundColor $Color }
-    $script:Report.Add($Text)
+    $script:Report.Add([pscustomobject]@{ Text = $Text; Color = "$Color" })
 }
 
 function Test-IsAdmin {
@@ -481,11 +482,24 @@ function Show-ProcessModules {
     }
     if ($extHits.Count -gt 0) {
         Write-Result "  Loaded DLLs outside Java/Windows/launcher folders: $($extHits.Count) (overlays, vendors - verify)" DarkCyan
-        $shown = 0
+        $shown    = 0
+        $unsigned = 0
         foreach ($e in $extHits) {
             if ($shown -ge 20) { Write-Result "      ... +$($extHits.Count - $shown) more" DarkGray; break }
-            Write-Result "      $e" DarkGray
+            $sig = 'UnknownError'
+            try { $sig = (Get-AuthenticodeSignature -LiteralPath $e -ErrorAction Stop).Status.ToString() } catch { }
+            if ($sig -eq 'Valid') {
+                Write-Result "      $e  [signed]" DarkGray
+            }
+            else {
+                $unsigned++
+                Write-Result "      $e  [$sig - NOT VALIDLY SIGNED]" Yellow
+            }
             $shown++
+        }
+        if ($unsigned -gt 0) {
+            $script:WarningCount++
+            Write-Result "  [REVIEW] $unsigned unsigned/untrusted external DLL(s) loaded in the JVM process" Yellow
         }
     }
 }
@@ -494,7 +508,8 @@ function Show-ProcessModules {
 # Environment persistence check
 # ----------------------------------------------------------------------
 function Show-EnvFlags {
-    Write-Result 'JVM-wide environment variables (affect EVERY Java process):' DarkGray
+    Write-Result '--- MACHINE-WIDE JVM VECTORS (affect every Java process) ---' Cyan
+    Write-Result 'Environment variables:' DarkGray
     $any = $false
     foreach ($name in @('JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS')) {
         foreach ($scope in @('Machine', 'User', 'Process')) {
@@ -515,7 +530,48 @@ function Show-EnvFlags {
         }
     }
     if (-not $any) { Write-Result '  none set (OK)' DarkGray }
+    Show-AttachTools
+    Show-PersistenceCheck
     Write-Result ''
+}
+
+function Show-AttachTools {
+    $toolNames = @('jcmd', 'jdb', 'jhsdb', 'jattach', 'jconsole', 'jvisualvm', 'visualvm')
+    $running = @()
+    foreach ($n in $toolNames) {
+        $p = Get-Process -Name $n -ErrorAction SilentlyContinue
+        if ($p) { $running += $p }
+    }
+    if ($running.Count -eq 0) { return }
+    $script:WarningCount++
+    $names = (@($running | ForEach-Object { $_.ProcessName }) | Sort-Object -Unique) -join ', '
+    Write-Result "  [REVIEW] JVM attach/diagnostic tool(s) running: $names" Yellow
+    Write-Result '             these can inject agents into a LIVE JVM - check what they are attached to' Yellow
+}
+
+function Show-PersistenceCheck {
+    $entries = @()
+    try { $entries = @(Get-CimInstance Win32_StartupCommand -ErrorAction Stop) } catch { }
+    $flagged = 0
+    foreach ($e in $entries) {
+        $cmd = "$($e.Command)"
+        if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+        $cmd = [Environment]::ExpandEnvironmentVariables($cmd)
+        $lvl = $null
+        if ($cmd -match '(?i)(-javaagent|-agentpath|-agentlib|-Xbootclasspath)') { $lvl = 'Critical' }
+        elseif ($cmd -match '(?i)(javaw?\.exe|\.jar\b)')                          { $lvl = 'Warning' }
+        elseif ($cmd -match [regex]::Escape($env:TEMP))                          { $lvl = 'Critical' }
+        if (-not $lvl) { continue }
+        $flagged++
+        Add-Hit $lvl
+        $cShow = $cmd
+        if ($cShow.Length -gt 160) { $cShow = $cShow.Substring(0, 160) + ' ...' }
+        Write-Result "  [$lvl] Startup entry: $($e.Name)  @ $($e.Location)" (Get-LevelColor $lvl)
+        Write-Result "         $cShow" DarkGray
+    }
+    if ($flagged -eq 0) {
+        Write-Result 'Startup persistence: no Java/agent-related auto-start entries (OK)' DarkGray
+    }
 }
 
 # ----------------------------------------------------------------------
@@ -751,12 +807,51 @@ function Save-Report {
     $path = $OutFile
     if (-not [System.IO.Path]::IsPathRooted($path)) { $path = Join-Path (Get-Location).Path $path }
     try {
-        [System.IO.File]::WriteAllLines($path, $script:Report, [System.Text.UTF8Encoding]::new($false))
+        if ($path -match '(?i)\.html?$') {
+            [System.IO.File]::WriteAllText($path, (ConvertTo-HtmlReport), [System.Text.UTF8Encoding]::new($false))
+        }
+        else {
+            $lines = @($script:Report | ForEach-Object { $_.Text })
+            [System.IO.File]::WriteAllLines($path, $lines, [System.Text.UTF8Encoding]::new($false))
+        }
         Write-Result "Report saved: $path" Green
     }
     catch {
         Write-Result "Could not save report: $($_.Exception.Message)" Red
     }
+}
+
+function ConvertTo-HtmlReport {
+    $colorMap = @{
+        Red = 'crit'; Yellow = 'warn'; Cyan = 'info'; Green = 'ok'
+        DarkGray = 'muted'; Gray = 'txt'; DarkYellow = 'warn2'
+        DarkCyan = 'hdr'; DarkBlue = 'hdr'; Magenta = 'hdr'; White = 'txt'
+    }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('<!DOCTYPE html>')
+    [void]$sb.AppendLine('<html lang="en"><head><meta charset="utf-8">')
+    [void]$sb.AppendLine('<title>JVM Inspector v2 - Screenshare Report</title>')
+    [void]$sb.AppendLine('<style>')
+    [void]$sb.AppendLine('body{background:#0d1117;color:#c9d1d9;padding:24px;margin:0}')
+    [void]$sb.AppendLine('h1{color:#58a6ff;font:600 20px Segoe UI,sans-serif;margin:0 0 4px}')
+    [void]$sb.AppendLine('.meta{color:#6e7681;font:13px Segoe UI,sans-serif;margin-bottom:18px}')
+    [void]$sb.AppendLine('pre{white-space:pre-wrap;font:13px Consolas,"Courier New",monospace;margin:0}')
+    [void]$sb.AppendLine('.crit{color:#ff5555;font-weight:700}.warn{color:#ffd166}.warn2{color:#b28500}')
+    [void]$sb.AppendLine('.info{color:#4dd2ff}.ok{color:#55ff99}.muted{color:#6e7681}')
+    [void]$sb.AppendLine('.hdr{color:#58a6ff;font-weight:700}.txt{color:#c9d1d9}')
+    [void]$sb.AppendLine('</style></head><body>')
+    [void]$sb.AppendLine('<h1>JVM Inspector v2 - Minecraft Screenshare Forensics</h1>')
+    [void]$sb.AppendLine('<div class="meta">Generated: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') +
+        ' | Host: ' + [Environment]::MachineName + ' | User: ' + [Environment]::UserName + '</div>')
+    [void]$sb.AppendLine('<pre>')
+    foreach ($r in $script:Report) {
+        $cls = $colorMap[$r.Color]
+        if (-not $cls) { $cls = 'txt' }
+        $esc = [System.Net.WebUtility]::HtmlEncode($r.Text)
+        [void]$sb.AppendLine('<span class="' + $cls + '">' + $esc + '</span>')
+    }
+    [void]$sb.AppendLine('</pre></body></html>')
+    return $sb.ToString()
 }
 
 # ----------------------------------------------------------------------
