@@ -29,7 +29,8 @@ agents, redirected game jars, external DLLs and hidden mods.
 | **Launch profile detection** | Shows Vanilla / Fabric / Quilt / Forge-NeoForge from the command line |
 | **Mods inventory** | Scans all known launcher instances (Modrinth, CurseForge, Prism, MultiMC, ATLauncher, .minecraft…) with per-jar SHA256 |
 | **Disguise detection** | Flags jars named like system files (`SYSTEM32.jar`, `svchost.jar`…) |
-| **Crack/cheat marker scan** | Scans the class strings of **every** mod jar for crack signatures (`cracked by`, `648k`, `license key`, `hwid`, `keyauth`) with word boundaries → **CRITICAL**. Catches cracked premium clients hiding under legit names |
+| **Known cheat-client ID** | Recognizes cheat clients even when repackaged under fake names — matched on branding assets/class strings (e.g. `SYSTEM32.jar` hiding **Bloom Client** via `bloom_logo.png` inside a fake *lithium* layout) → **`[ CRITICAL ] CHEAT CLIENT detected`** |
+| **Crack/cheat marker scan** | Scans the class strings of **every** mod jar for cheat scaffolding (`cracked by`, `648k`, `license key`, `hwid`, `keyauth`) with word boundaries → **CRITICAL** (count only, no raw strings printed) |
 | **Mod identity check** | For flagged jars reads `fabric.mod.json`: shows what the jar *claims* to be (id/name/version/entrypoints), flags **file-name ↔ mod-id mismatch** and hidden nested containers (`MC Bootstrap`, `OptLib Core`…) |
 | **Cheat keyword scan** | Names of known clients/features in args, classpath and mod filenames (a hit = *verify*, never proof) |
 | **Risk verdict** | `CLEAN` / `REVIEW` / `SUSPICIOUS` with critical/warning/info counters |
