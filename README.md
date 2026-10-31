@@ -55,6 +55,10 @@ Run **as Administrator** for the parent-process and loaded-DLL checks.
 A keyword or a red flag is **never proof by itself** — it only tells the
 reviewer where to look. Always open the jar / check the folder to conclude.
 
+## Case study
+
+- **[SYSTEM32.jar — a cracked client hiding as a mod](docs/SYSTEM32-case-study.md)** — a real detection: 4 layers of camouflage (filename → system file, metadata → Clumps, packages → Lithium, hidden JiJ containers), caught by the disguise + crack-marker checks.
+
 ## Notes
 
 - Only processes running **at scan time** are inspected.
