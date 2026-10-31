@@ -100,6 +100,24 @@ $script:DisguisedNames = @(
     'javaw64', 'csrss64', 'minecraft', 'launcher'
 )
 
+# DLLs extracted to %TEMP% by KNOWN components (false-positive filter):
+# mods/libraries that legitimately extract natives with hashed folder names.
+$script:KnownTempNatives = @{
+    'libopus4j'    = 'Simple Voice Chat native (Opus codec)'
+    'librnnoise4j' = 'Simple Voice Chat native (noise suppression)'
+    'libspeex4j'   = 'Simple Voice Chat native (Speex codec)'
+    'liblame4j'    = 'Simple Voice Chat native (MP3 encoder)'
+    'jnidispatch'  = 'JNA runtime extraction'
+}
+
+function Get-TempNativeLabel {
+    param([string]$DllPath)
+    $name = [System.IO.Path]::GetFileNameWithoutExtension($DllPath)
+    if ([string]::IsNullOrEmpty($name)) { return $null }
+    if ($script:KnownTempNatives.ContainsKey($name)) { return $script:KnownTempNatives[$name] }
+    return $null
+}
+
 # System properties whose VALUE is a filesystem path we can validate
 $script:PathKeys = @(
     'fabric.addMods'
@@ -443,7 +461,10 @@ function Show-ProcessModules {
     }
     $tempHits  = New-Object System.Collections.Generic.List[string]
     $extHits   = New-Object System.Collections.Generic.List[string]
+    $knownTemp = New-Object System.Collections.Generic.List[object]
     $seenTemp  = @{}
+    $seenExt   = @{}
+    $seenKnown = @{}
     $seenExt   = @{}
     foreach ($m in $modules) {
         $mp = $m.FileName
@@ -462,7 +483,14 @@ function Show-ProcessModules {
             if (Test-IsWithin $mp $r) { $isBad = $true; break }
         }
         if ($isBad) {
-            if (-not $seenTemp.ContainsKey($mp.ToLowerInvariant())) {
+            $label = Get-TempNativeLabel -DllPath $mp
+            if ($label) {
+                if (-not $seenKnown.ContainsKey($mp.ToLowerInvariant())) {
+                    $seenKnown[$mp.ToLowerInvariant()] = $true
+                    $knownTemp.Add([pscustomobject]@{ Path = $mp; Label = $label })
+                }
+            }
+            elseif (-not $seenTemp.ContainsKey($mp.ToLowerInvariant())) {
                 $seenTemp[$mp.ToLowerInvariant()] = $true
                 $tempHits.Add($mp)
             }
@@ -475,10 +503,18 @@ function Show-ProcessModules {
         }
     }
 
+    if ($knownTemp.Count -gt 0) {
+        Write-Result "  TEMP-extracted natives from KNOWN components (normal): $($knownTemp.Count)" DarkCyan
+        foreach ($k in $knownTemp) { Write-Result "      $($k.Path)  <- $($k.Label)" DarkGray }
+    }
     if ($tempHits.Count -gt 0) {
         $script:Critical++
-        Write-Result "  [!] $($tempHits.Count) DLL(s) loaded from TEMP/Downloads - INJECTION SUSPECT:" Red
-        foreach ($t in $tempHits) { Write-Result "      $t" Red }
+        Write-Result "  [!] $($tempHits.Count) UNKNOWN DLL(s) loaded from TEMP/Downloads - INJECTION SUSPECT:" Red
+        foreach ($t in $tempHits) {
+            $sig = 'UnknownError'
+            try { $sig = (Get-AuthenticodeSignature -LiteralPath $t -ErrorAction Stop).Status.ToString() } catch { }
+            Write-Result "      $t  [$sig]" Red
+        }
     }
     if ($extHits.Count -gt 0) {
         Write-Result "  Loaded DLLs outside Java/Windows/launcher folders: $($extHits.Count) (overlays, vendors - verify)" DarkCyan
