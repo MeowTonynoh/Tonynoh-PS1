@@ -650,6 +650,89 @@ function Get-ModsDirectories {
     return @($found.Values | Sort-Object)
 }
 
+# Crack / cheat markers: strings commonly found inside cracked or pirated
+# clients ("Cracked by <cracker>", license/auth scaffolding, HWID checks).
+# A hit inside class constant-pools is a strong cheat indicator.
+function Find-JarMarkers {
+    param([string]$JarPath)
+    $markers = @('cracked by', 'crackedby', 'crack by', '648k', 'license key', 'keyauth', 'hwid')
+    $found   = @{}   # marker -> first class file that contains it
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
+        try {
+            $enc = [System.Text.Encoding]::GetEncoding(28591)
+            foreach ($e in $zip.Entries) {
+                if ($found.Count -ge $markers.Count) { break }
+                if ($e.FullName -notlike '*.class') { continue }
+                $ms = New-Object System.IO.MemoryStream
+                $s  = $e.Open(); $s.CopyTo($ms); $s.Close()
+                $str = $enc.GetString($ms.ToArray())
+                $ms.Dispose()
+                foreach ($mk in $markers) {
+                    if ($found.ContainsKey($mk)) { continue }
+                    if ($str.IndexOf($mk, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                        $found[$mk] = $e.FullName
+                        break
+                    }
+                }
+            }
+        }
+        finally { $zip.Dispose() }
+    }
+    catch { }
+    $out = @()
+    foreach ($k in $found.Keys) { $out += [pscustomobject]@{ Marker = $k; Class = $found[$k] } }
+    return $out
+}
+
+# Identity metadata of a mod jar: what the jar CLAIMS to be vs its file name.
+function Get-ModMetadata {
+    param([string]$JarPath)
+    $meta = [pscustomobject]@{
+        Id = ''; Name = ''; Version = ''; Entrypoints = ''
+        Containers = @(); Error = ''
+    }
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
+        try {
+            $e = $zip.GetEntry('fabric.mod.json')
+            if ($e) {
+                $sr = New-Object System.IO.StreamReader($e.Open())
+                $json = $sr.ReadToEnd(); $sr.Close()
+                try {
+                    $j = $json | ConvertFrom-Json
+                    $meta.Id      = "$($j.id)"
+                    $meta.Name    = "$($j.name)"
+                    $meta.Version = "$($j.version)"
+                    if ($j.entrypoints) {
+                        $eps = @()
+                        foreach ($p in $j.entrypoints.PSObject.Properties) {
+                            $first = @($p.Value) | Select-Object -First 1
+                            $eps += "$($p.Name)=$first"
+                        }
+                        $meta.Entrypoints = $eps -join ', '
+                    }
+                }
+                catch { $meta.Error = 'fabric.mod.json not parseable' }
+            }
+            foreach ($n in @('fabric_loader.json', 'META-INF/jars/fabric.mod.json')) {
+                $ce = $zip.GetEntry($n)
+                if (-not $ce) { continue }
+                $sr2 = New-Object System.IO.StreamReader($ce.Open())
+                $cj  = $sr2.ReadToEnd(); $sr2.Close()
+                try {
+                    $cjObj = $cj | ConvertFrom-Json
+                    if ($cjObj.id) { $meta.Containers += "$($cjObj.id) ($($cjObj.name))" }
+                }
+                catch { }
+            }
+        }
+        finally { $zip.Dispose() }
+    }
+    catch { $meta.Error = $_.Exception.Message }
+    return $meta
+}
+
 function Show-ModsInventory {
     Write-Result ''
     Write-Result '--- MODS INVENTORY (known launcher instances) ---' Cyan
@@ -672,8 +755,9 @@ function Show-ModsInventory {
             $kw = Find-BadKeyword $jar.Name
             $baseName = [System.IO.Path]::GetFileNameWithoutExtension($jar.Name)
             $isDisguised = ($script:DisguisedNames -contains $baseName)
+            $isFlagged = ($kw -or $isDisguised)
             $hashTxt = ''
-            if ($Hash) {
+            if ($Hash -or $isFlagged) {
                 try {
                     $h = (Get-FileHash -LiteralPath $jar.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
                     $hashTxt = '  sha256:' + $h.Substring(0, 12)
@@ -693,6 +777,36 @@ function Show-ModsInventory {
             }
             else {
                 Write-Result $line DarkGray
+            }
+
+            # crack / cheat markers inside class strings (checked in EVERY jar)
+            $markers = Find-JarMarkers -JarPath $jar.FullName
+            if ($markers.Count -gt 0) {
+                $script:Critical++
+                Write-Result '          [CRITICAL] crack/cheat marker(s) found inside class strings:' Red
+                foreach ($mk in $markers) {
+                    Write-Result "              '$($mk.Marker)'  <- $($mk.Class)" Red
+                }
+                Write-Result '          -> cracked/pirated client = cheat + malware risk - DO NOT RUN' Red
+            }
+
+            # identity deep-dive for flagged jars: what does the jar CLAIM to be?
+            if ($isFlagged) {
+                $md = Get-ModMetadata -JarPath $jar.FullName
+                if ($md.Id) {
+                    Write-Result "          -> claims to be: id=$($md.Id)  name=$($md.Name)  version=$($md.Version)" DarkGray
+                    if ($md.Entrypoints) { Write-Result "          -> entrypoints: $($md.Entrypoints)" DarkGray }
+                    if (-not $baseName.ToLowerInvariant().Contains($md.Id.ToLowerInvariant())) {
+                        $script:WarningCount++
+                        Write-Result "          [!] FILE NAME DOES NOT MATCH MOD ID '$($md.Id)' - jar is disguised" Yellow
+                    }
+                }
+                elseif ($md.Error) {
+                    Write-Result "          -> identity unreadable: $($md.Error)" DarkYellow
+                }
+                if ($md.Containers.Count -gt 0) {
+                    Write-Result ('          -> hidden nested containers: ' + ($md.Containers -join ', ')) DarkGray
+                }
             }
             $shown++
         }
