@@ -1,9 +1,16 @@
 <#
 .SYNOPSIS
-    JVM Inspector v2 - Minecraft Screenshare Forensics
+    JVM Inspector v3 - Minecraft Screenshare Forensics
 .DESCRIPTION
     Improved fork of the original JVM Inspector by Tonynoh (discord.gg/ssa).
 
+    What's new in v3:
+      * Generic cheat-flag scan: ~90 cheat module/feature names matched against
+        the class strings of EVERY mod jar, regardless of the client
+        (works on unknown/private clients) -> class + context evidence
+      * -DumpStrings <jar>: full printable-string export for manual analysis
+      * MEOW-style output: numbered sections, [ TAG ] severity labels,
+        separators and verdict box
     What's new in v2:
       * Deep -javaagent analysis: reads MANIFEST.MF (Premain-Class) and class
         packages straight from the jar and matches them against known
@@ -258,7 +265,7 @@ function Get-ArgSeverity {
         '-agentlib*'                    { return (New-Severity 'Critical' 'Native agent library loaded (-agentlib)') }
         '-Xbootclasspath*'              { return (New-Severity 'Critical' 'Boot classpath override - can replace core JVM classes') }
         '-Djdk.attach.allowAttachSelf*' {
-            if ($Arg -match '(?i)false') { return (New-Severity 'Info' 'JVM self-attach disabled (OK)') }
+            if ($Arg -match '(?i)false') { return (New-Severity 'Info' 'JVM self-attach disabled ( OK )') }
             return (New-Severity 'Critical' 'JVM self-attach enabled - allows late agent injection')
         }
         '-Dfabric.addMods*'             { return (New-Severity 'Warning' 'Fabric: extra mod files loaded from a custom path') }
@@ -320,7 +327,7 @@ function Get-PathInfo {
     foreach ($r in $script:KnownRoots) {
         if (Test-IsWithin $info.Path $r) {
             $info.Category = 'Launcher'
-            $info.Label    = 'inside known launcher folder (OK)'
+            $info.Label    = 'inside known launcher folder ( OK )'
             $info.Color    = 'Green'; $info.Severity = 'OK'
             return $info
         }
@@ -460,7 +467,7 @@ function Show-ProcessModules {
         $modules = @($netProc.Modules)
     }
     catch {
-        Write-Result '  Loaded DLLs: cannot read (try running as Administrator)' DarkYellow
+        Write-Result '  [ DLLS ] cannot read the module list ( try running as Administrator )' DarkYellow
         return
     }
     $tempHits  = New-Object System.Collections.Generic.List[string]
@@ -508,20 +515,20 @@ function Show-ProcessModules {
     }
 
     if ($knownTemp.Count -gt 0) {
-        Write-Result "  TEMP-extracted natives from KNOWN components (normal): $($knownTemp.Count)" DarkCyan
-        foreach ($k in $knownTemp) { Write-Result "      $($k.Path)  <- $($k.Label)" DarkGray }
+        Write-Result "  [ DLLS ] TEMP-extracted natives from KNOWN components ( normal ): $($knownTemp.Count)" DarkCyan
+        foreach ($k in $knownTemp) { Write-Result "      $($k.Path)   ( $($k.Label) )" DarkGray }
     }
     if ($tempHits.Count -gt 0) {
         $script:Critical++
-        Write-Result "  [!] $($tempHits.Count) UNKNOWN DLL(s) loaded from TEMP/Downloads - INJECTION SUSPECT:" Red
+        Write-Result "  [ CRITICAL ] $($tempHits.Count) UNKNOWN DLL(s) loaded from TEMP/DOWNLOADS - INJECTION SUSPECT:" Red
         foreach ($t in $tempHits) {
             $sig = 'UnknownError'
             try { $sig = (Get-AuthenticodeSignature -LiteralPath $t -ErrorAction Stop).Status.ToString() } catch { }
-            Write-Result "      $t  [$sig]" Red
+            Write-Result "      $t   [ $sig ]" Red
         }
     }
     if ($extHits.Count -gt 0) {
-        Write-Result "  Loaded DLLs outside Java/Windows/launcher folders: $($extHits.Count) (overlays, vendors - verify)" DarkCyan
+        Write-Result "  [ DLLS ] outside Java/Windows/launcher folders: $($extHits.Count) ( overlays, vendors - verify )" DarkCyan
         $shown    = 0
         $unsigned = 0
         foreach ($e in $extHits) {
@@ -529,17 +536,17 @@ function Show-ProcessModules {
             $sig = 'UnknownError'
             try { $sig = (Get-AuthenticodeSignature -LiteralPath $e -ErrorAction Stop).Status.ToString() } catch { }
             if ($sig -eq 'Valid') {
-                Write-Result "      $e  [signed]" DarkGray
+                Write-Result "      $e   [ SIGNED ]" DarkGray
             }
             else {
                 $unsigned++
-                Write-Result "      $e  [$sig - NOT VALIDLY SIGNED]" Yellow
+                Write-Result "      $e   [ $sig - NOT VALIDLY SIGNED ]" Yellow
             }
             $shown++
         }
         if ($unsigned -gt 0) {
             $script:WarningCount++
-            Write-Result "  [REVIEW] $unsigned unsigned/untrusted external DLL(s) loaded in the JVM process" Yellow
+            Write-Result "  [ REVIEW ] $unsigned unsigned/untrusted external DLL(s) loaded in the JVM process" Yellow
         }
     }
 }
@@ -548,8 +555,8 @@ function Show-ProcessModules {
 # Environment persistence check
 # ----------------------------------------------------------------------
 function Show-EnvFlags {
-    Write-Result '--- MACHINE-WIDE JVM VECTORS (affect every Java process) ---' Cyan
-    Write-Result 'Environment variables:' DarkGray
+    Write-Result '[ 01 ] ============ MACHINE-WIDE JVM VECTORS ( affect every Java process ) ============' Green
+    Write-Result '  [ ENV ] Environment variables' DarkCyan
     $any = $false
     foreach ($name in @('JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS')) {
         foreach ($scope in @('Machine', 'User', 'Process')) {
@@ -560,16 +567,16 @@ function Show-EnvFlags {
             if ($vShow.Length -gt 160) { $vShow = $vShow.Substring(0, 160) + ' ...' }
             if ($vShow -match '(?i)(-javaagent|-agentpath|-agentlib|-Xbootclasspath)') {
                 $script:Critical++
-                Write-Result "  [CRITICAL] $name ($scope) = $vShow" Red
-                Write-Result '             persistent agent/classpath injection vector - not normal' Red
+                Write-Result "  [ CRITICAL ] $name ( $scope ) = $vShow" Red
+                Write-Result '               -> persistent agent/classpath injection vector - not normal' Red
             }
             else {
                 $script:WarningCount++
-                Write-Result "  [REVIEW]   $name ($scope) = $vShow" Yellow
+                Write-Result "  [ REVIEW ]   $name ( $scope ) = $vShow" Yellow
             }
         }
     }
-    if (-not $any) { Write-Result '  none set (OK)' DarkGray }
+    if (-not $any) { Write-Result '  [ OK ] none set ( machine, user, process )' DarkGray }
     Show-AttachTools
     Show-PersistenceCheck
     Write-Result ''
@@ -585,8 +592,8 @@ function Show-AttachTools {
     if ($running.Count -eq 0) { return }
     $script:WarningCount++
     $names = (@($running | ForEach-Object { $_.ProcessName }) | Sort-Object -Unique) -join ', '
-    Write-Result "  [REVIEW] JVM attach/diagnostic tool(s) running: $names" Yellow
-    Write-Result '             these can inject agents into a LIVE JVM - check what they are attached to' Yellow
+    Write-Result "  [ REVIEW ] JVM attach/diagnostic tool(s) running: $names" Yellow
+    Write-Result '             -> these can inject agents into a LIVE JVM - check what they are attached to' Yellow
 }
 
 function Show-PersistenceCheck {
@@ -606,11 +613,11 @@ function Show-PersistenceCheck {
         Add-Hit $lvl
         $cShow = $cmd
         if ($cShow.Length -gt 160) { $cShow = $cShow.Substring(0, 160) + ' ...' }
-        Write-Result "  [$lvl] Startup entry: $($e.Name)  @ $($e.Location)" (Get-LevelColor $lvl)
-        Write-Result "         $cShow" DarkGray
+        Write-Result "  [ $($lvl.ToUpper()) ] Startup entry: $($e.Name)   ( $($e.Location) )" (Get-LevelColor $lvl)
+        Write-Result "             $cShow" DarkGray
     }
     if ($flagged -eq 0) {
-        Write-Result 'Startup persistence: no Java/agent-related auto-start entries (OK)' DarkGray
+        Write-Result '  [ OK ] startup persistence: no Java/agent-related auto-start entries' DarkGray
     }
 }
 
@@ -863,16 +870,16 @@ function Get-ModMetadata {
 
 function Show-ModsInventory {
     Write-Result ''
-    Write-Result '--- MODS INVENTORY (known launcher instances) ---' Cyan
+    Write-Result '[ 03 ] ==================== MODS INVENTORY ( known launcher instances ) ====================' Green
     $dirs = Get-ModsDirectories
     if ($dirs.Count -eq 0) {
-        Write-Result 'No known launcher mods folders found. Use -ModsPath "C:\path\to\mods" to check one manually.' DarkYellow
+        Write-Result '  [ ! ] No known launcher mods folders found. Use -ModsPath "C:\path\to\mods" to check one manually.' DarkYellow
         return
     }
     foreach ($d in $dirs) {
         $jars = @(Get-ChildItem -LiteralPath $d -Filter '*.jar' -File -ErrorAction SilentlyContinue | Sort-Object Name)
         Write-Result ''
-        Write-Result "  $d  ($($jars.Count) jars)" DarkGray
+        Write-Result "  [ MODS ] $d   ( $($jars.Count) jars )" DarkCyan
         if ($jars.Count -eq 0) { continue }
         $shown = 0
         foreach ($jar in $jars) {
@@ -888,20 +895,20 @@ function Show-ModsInventory {
             if ($Hash -or $isFlagged) {
                 try {
                     $h = (Get-FileHash -LiteralPath $jar.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
-                    $hashTxt = '  sha256:' + $h.Substring(0, 12)
+                    $hashTxt = '  [ sha256: ' + $h.Substring(0, 12) + ' ]'
                 }
-                catch { $hashTxt = '  sha256:<unreadable>' }
+                catch { $hashTxt = '  [ sha256: <unreadable> ]' }
             }
-            $line = '      {0}  ({1} KB, {2:yyyy-MM-dd}){3}' -f $jar.Name, [int]($jar.Length / 1KB), $jar.LastWriteTime, $hashTxt
+            $line = '      {0}   ( {1} KB, {2:yyyy-MM-dd} ){3}' -f $jar.Name, [int]($jar.Length / 1KB), $jar.LastWriteTime, $hashTxt
             if ($kw) {
                 $script:WarningCount++
-                Write-Result ('[!] ' + $line.TrimStart()) Yellow
-                Write-Result "          keyword '$kw' matched - open and verify this jar" Yellow
+                Write-Result ('[ ! ] ' + $line.TrimStart()) Yellow
+                Write-Result "          -> keyword '$kw' matched - open and verify this jar" Yellow
             }
             elseif ($isDisguised) {
                 $script:WarningCount++
-                Write-Result ('[!] ' + $line.TrimStart()) Yellow
-                Write-Result '          jar disguised as a system/process file name - verify this jar' Yellow
+                Write-Result ('[ ! ] ' + $line.TrimStart()) Yellow
+                Write-Result '          -> jar disguised as a system/process file name - verify this jar' Yellow
             }
             else {
                 Write-Result $line DarkGray
@@ -911,18 +918,18 @@ function Show-ModsInventory {
             $hits = Find-JarStringHits -JarPath $jar.FullName
             if ($hits.Markers.Count -gt 0) {
                 $script:Critical++
-                Write-Result '          [CRITICAL] crack/cheat marker(s) found inside class strings:' Red
+                Write-Result '          [ CRITICAL ] crack/cheat marker(s) found inside class strings:' Red
                 foreach ($mk in $hits.Markers) {
-                    Write-Result "              '$($mk.Marker)'  <- $($mk.Class)" Red
+                    Write-Result "              [ $($mk.Marker) ]  <-  $($mk.Class)" Red
                 }
                 Write-Result '          -> cracked/pirated client = cheat + malware risk - DO NOT RUN' Red
             }
             if ($hits.Cheats.Count -gt 0) {
                 $script:WarningCount++
-                Write-Result '          [!] generic cheat flag(s) - module/feature strings inside classes (verify):' Yellow
+                Write-Result '          [ WARNING ] generic cheat flag(s) - module/feature strings inside classes ( verify ):' Yellow
                 foreach ($ch in $hits.Cheats) {
-                    Write-Result "              '$($ch.Match)'  <- $($ch.Class)" Yellow
-                    Write-Result "                  context: $($ch.Context)" DarkGray
+                    Write-Result "              [ $($ch.Match) ]  <-  $($ch.Class)" Yellow
+                    Write-Result "                  ( context: $($ch.Context) )" DarkGray
                 }
                 Write-Result '          -> matches cheat module names regardless of client - check this jar' Yellow
             }
@@ -935,7 +942,7 @@ function Show-ModsInventory {
                     if ($md.Entrypoints) { Write-Result "          -> entrypoints: $($md.Entrypoints)" DarkGray }
                     if (-not $baseName.ToLowerInvariant().Contains($md.Id.ToLowerInvariant())) {
                         $script:WarningCount++
-                        Write-Result "          [!] FILE NAME DOES NOT MATCH MOD ID '$($md.Id)' - jar is disguised" Yellow
+                        Write-Result "          [ MISMATCH ] file name does not match mod id '$($md.Id)' - jar is disguised" Yellow
                     }
                 }
                 elseif ($md.Error) {
@@ -955,31 +962,31 @@ function Show-ModsInventory {
 # ----------------------------------------------------------------------
 function Show-ProcessReport {
     param($Process)
-    Write-Result "PID $($Process.ProcessId) ($($Process.Name))" DarkGray
+    Write-Result "  [ PROCESS ] PID $($Process.ProcessId)   ( $($Process.Name) )" Cyan
 
     $cmd = $Process.CommandLine
     if (-not $cmd) {
-        Write-Result '  CommandLine not accessible (run PowerShell as admin).' DarkYellow
+        Write-Result '    [ ! ] CommandLine not accessible ( run PowerShell as admin )' DarkYellow
         Write-Result ''
         return
     }
 
     $profile = Get-LaunchProfile -CommandLine $cmd
-    if ($profile) { Write-Result "  Launch profile: $profile" DarkGray }
+    if ($profile) { Write-Result "    Launch profile : $profile" DarkGray }
 
     $parent = Get-ParentInfo -Process $Process
     if ($parent.Suspicious) {
         $script:Critical++
-        Write-Result "  [CRITICAL] Parent process: $($parent.Name) (PID $($parent.Pid)) launched FROM TEMP/DOWNLOADS - injection suspect" Red
+        Write-Result "    [ CRITICAL ] Parent: $($parent.Name) ( PID $($parent.Pid) ) launched FROM TEMP/DOWNLOADS - injection suspect" Red
     }
     elseif ($parent.IsKnown) {
-        Write-Result "  Parent: $($parent.Name) (known launcher/console - OK)" DarkGray
+        Write-Result "    Parent         : $($parent.Name)   [ OK ] ( known launcher/console )" DarkGray
     }
     elseif ($parent.Note) {
-        Write-Result "  Parent: $($parent.Note)" DarkGray
+        Write-Result "    Parent         : $($parent.Note)" DarkGray
     }
     else {
-        Write-Result "  Parent: $($parent.Name) (PID $($parent.Pid)) - unknown parent, verify" DarkYellow
+        Write-Result "    Parent         : $($parent.Name) ( PID $($parent.Pid) )   [ REVIEW ] - unknown parent, verify" DarkYellow
     }
 
     $tokens      = Get-JvmArgTokens -CommandLine $cmd
@@ -988,7 +995,7 @@ function Show-ProcessReport {
     $argKeyword  = $false
 
     if ($relevant.Count -eq 0) {
-        Write-Result '  No relevant arguments found.' DarkGray
+        Write-Result '    ( no relevant arguments found )' DarkGray
     }
 
     foreach ($arg in $relevant) {
@@ -1011,14 +1018,14 @@ function Show-ProcessReport {
                 $sev = New-Severity 'OK' "known launcher agent: $($agent.KnownName)"
                 if ($agent.Premain) { $details.Add(@{ Text = "     -> Premain-Class: $($agent.Premain)"; Color = 'Gray' }) }
                 if ($agent.Packages.Count) { $details.Add(@{ Text = '     -> packages: ' + ($agent.Packages -join ', '); Color = 'Gray' }) }
-                $details.Add(@{ Text = "     -> KNOWN LEGITIMATE AGENT: $($agent.KnownName)"; Color = 'Green' })
+                $details.Add(@{ Text = "     -> [ KNOWN LEGITIMATE AGENT ] $($agent.KnownName)"; Color = 'Green' })
             }
             else {
                 $sev = New-Severity 'Critical' 'UNKNOWN java agent - manual verification required'
                 if ($agent.Premain) { $details.Add(@{ Text = "     -> Premain-Class: $($agent.Premain)"; Color = 'Yellow' }) }
                 if ($agent.Packages.Count) { $details.Add(@{ Text = '     -> packages: ' + ($agent.Packages -join ', '); Color = 'Yellow' }) }
                 if ($agent.Error) { $details.Add(@{ Text = "     -> $($agent.Error)"; Color = 'Red' }) }
-                $details.Add(@{ Text = '     -> NOT a known launcher agent: open the jar and verify its origin'; Color = 'Red' })
+                $details.Add(@{ Text = '     -> [ UNKNOWN AGENT ] not a known launcher agent - open the jar and verify its origin'; Color = 'Red' })
             }
         }
         # ---- -D system property with a path value -----------------------
@@ -1051,7 +1058,7 @@ function Show-ProcessReport {
         if ($kw) {
             $script:WarningCount++
             $argKeyword = $true
-            $details.Add(@{ Text = "     -> [!] keyword '$kw' matched - verify manually (keyword is NOT proof)"; Color = 'Yellow' })
+            $details.Add(@{ Text = "     -> [ ! ] keyword '$kw' matched - verify manually ( keyword is NOT proof )"; Color = 'Yellow' })
         }
 
         Write-Result ('  ' + $arg) (Get-LevelColor $sev.Level)
@@ -1065,7 +1072,7 @@ function Show-ProcessReport {
         $cmdKw = Find-BadKeyword $cmd
         if ($cmdKw) {
             $script:WarningCount++
-            Write-Result "  [!] Keyword '$cmdKw' found in the full command line (classpath/main args) - open and verify" Yellow
+            Write-Result "  [ ! ] Keyword '$cmdKw' found in the full command line ( classpath/main args ) - open and verify" Yellow
         }
     }
 
@@ -1101,7 +1108,7 @@ function Save-Report {
             $lines = @($script:Report | ForEach-Object { $_.Text })
             [System.IO.File]::WriteAllLines($path, $lines, [System.Text.UTF8Encoding]::new($false))
         }
-        Write-Result "Report saved: $path" Green
+        Write-Result "  [ OK ] Report saved: $path" Green
     }
     catch {
         Write-Result "Could not save report: $($_.Exception.Message)" Red
@@ -1117,17 +1124,17 @@ function ConvertTo-HtmlReport {
     $sb = New-Object System.Text.StringBuilder
     [void]$sb.AppendLine('<!DOCTYPE html>')
     [void]$sb.AppendLine('<html lang="en"><head><meta charset="utf-8">')
-    [void]$sb.AppendLine('<title>JVM Inspector v2 - Screenshare Report</title>')
+    [void]$sb.AppendLine('<title>JVM Inspector v3 - Screenshare Report</title>')
     [void]$sb.AppendLine('<style>')
     [void]$sb.AppendLine('body{background:#0d1117;color:#c9d1d9;padding:24px;margin:0}')
-    [void]$sb.AppendLine('h1{color:#58a6ff;font:600 20px Segoe UI,sans-serif;margin:0 0 4px}')
+    [void]$sb.AppendLine('h1{color:#00FFB3;font:600 20px Consolas,monospace;margin:0 0 4px}')
     [void]$sb.AppendLine('.meta{color:#6e7681;font:13px Segoe UI,sans-serif;margin-bottom:18px}')
     [void]$sb.AppendLine('pre{white-space:pre-wrap;font:13px Consolas,"Courier New",monospace;margin:0}')
     [void]$sb.AppendLine('.crit{color:#ff5555;font-weight:700}.warn{color:#ffd166}.warn2{color:#b28500}')
-    [void]$sb.AppendLine('.info{color:#4dd2ff}.ok{color:#55ff99}.muted{color:#6e7681}')
-    [void]$sb.AppendLine('.hdr{color:#58a6ff;font-weight:700}.txt{color:#c9d1d9}')
+    [void]$sb.AppendLine('.info{color:#4dd2ff}.ok{color:#00FFB3;font-weight:700}.muted{color:#6e7681}')
+    [void]$sb.AppendLine('.hdr{color:#00FFB3;font-weight:700}.txt{color:#c9d1d9}')
     [void]$sb.AppendLine('</style></head><body>')
-    [void]$sb.AppendLine('<h1>JVM Inspector v2 - Minecraft Screenshare Forensics</h1>')
+    [void]$sb.AppendLine('<h1>JVM Inspector v3 - Minecraft Screenshare Forensics</h1>')
     [void]$sb.AppendLine('<div class="meta">Generated: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') +
         ' | Host: ' + [Environment]::MachineName + ' | User: ' + [Environment]::UserName + '</div>')
     [void]$sb.AppendLine('<pre>')
@@ -1145,31 +1152,36 @@ function ConvertTo-HtmlReport {
 # Main
 # ----------------------------------------------------------------------
 Clear-Host
-Write-Result 'JVM Inspector v2 - Minecraft Screenshare Forensics' Cyan
-Write-Result 'Original by Tonynoh - discord.gg/ssa | Fork & improvements by ItzMeow80' DarkCyan
+Write-Result '[ ================================================================== ]' Green
+Write-Result '   JVM INSPECTOR v3   -   Minecraft Screenshare Forensics' Green
+Write-Result '   ( original: Tonynoh - discord.gg/ssa )   ( fork & improvements: ItzMeow80 )' DarkCyan
+Write-Result '[ ================================================================== ]' Green
 Write-Result ''
+Write-Result '  Tool      :  JVM Inspector v3 ( forensics build )' DarkCyan
+Write-Result '  Vectors   :  Disk  .  Process  .  Memory  .  Strings  .  Persistence' DarkCyan
 if (Test-IsAdmin) {
-    Write-Result 'Elevation: Administrator (full access)' DarkGray
+    Write-Result '  Elevation :  [ ADMIN ] ( full access )' Green
 }
 else {
-    Write-Result 'Elevation: NOT admin - run as Administrator for DLL & parent checks' DarkYellow
+    Write-Result '  Elevation :  [ NO-ADMIN ] ( run as Administrator for DLL & parent checks )' Yellow
 }
 Write-Result ''
 
 Show-EnvFlags
 
 $processes = @(Get-CimInstance Win32_Process -Filter "name = 'javaw.exe' OR name = 'java.exe'")
+Write-Result '[ 02 ] ==================== LIVE JAVA PROCESSES ( at scan time ) ====================' Green
 if (-not $processes) {
-    Write-Result 'No javaw.exe / java.exe process found.' Yellow
+    Write-Result '  [ ! ] No javaw.exe / java.exe process found.' Yellow
     if (-not $SkipModules) {
-        Write-Result '  -> loaded-DLL check (TEMP/Downloads injection suspect), javaagent flags,' Yellow
-        Write-Result '     parent process and launch profile only run on LIVE processes:' Yellow
-        Write-Result '     START THE GAME (suspect client), keep it running, then scan again.' Yellow
+        Write-Result '      -> loaded-DLL check ( TEMP/Downloads injection suspect ), javaagent flags,' Yellow
+        Write-Result '         parent process and launch profile only run on LIVE processes:' Yellow
+        Write-Result '         START THE GAME ( suspect client ), keep it running, then scan again.' Yellow
     }
 }
 else {
     $processLabel = if ($processes.Count -eq 1) { 'process' } else { 'processes' }
-    Write-Result "Found $($processes.Count) running Java $processLabel." Gray
+    Write-Result "  ( $($processes.Count) running Java $processLabel )" Gray
     Write-Result ''
     foreach ($proc in $processes) { Show-ProcessReport -Process $proc }
 }
@@ -1179,37 +1191,40 @@ if (-not $SkipMods) { Show-ModsInventory }
 # --- Optional full string dump of a jar (manual analysis) --------------
 if ($DumpStrings) {
     Write-Result ''
-    Write-Result '================ STRING DUMP ================' Cyan
+    Write-Result '[ 04 ] ============================ STRING DUMP ( manual analysis ) ===========================' Green
     try {
         $jarFull = (Resolve-Path -LiteralPath $DumpStrings).Path
         if (Test-Path -LiteralPath $jarFull -PathType Container) {
-            Write-Result "DumpStrings expects a JAR file, not a folder: $jarFull" Red
+            Write-Result "  [ ! ] DumpStrings expects a JAR file, not a folder: $jarFull" Red
         }
         else {
             $outPath = Join-Path $env:TEMP (([IO.Path]::GetFileNameWithoutExtension($jarFull)) + '.strings.txt')
             $d = Export-JarStrings -JarPath $jarFull -OutPath $outPath
-            Write-Result "Dumped $($d.Strings) readable string(s) from $($d.Entries) entrie(s) of:" Gray
-            Write-Result "  $jarFull" Gray
-            Write-Result "  -> $($d.Path)" Green
-            Write-Result '  (strings may contain GUI labels, module names, URLs, tokens - review by hand)' DarkGray
+            Write-Result "  [ OK ] dumped $($d.Strings) readable string(s) from $($d.Entries) entrie(s):" Green
+            Write-Result "     source  : $($d.Path -replace '\.strings\.txt$', '')" Gray
+            Write-Result "     output  : [ $($d.Path) ]" Green
+            Write-Result '     ( strings may contain GUI labels, module names, URLs, tokens - review by hand )' DarkGray
         }
     }
     catch {
-        Write-Result "String dump failed: $($_.Exception.Message)" Red
+        Write-Result "  [ ! ] String dump failed: $($_.Exception.Message)" Red
     }
 }
 
 # --- Verdict -----------------------------------------------------------
 Write-Result ''
-Write-Result '================ RISK SUMMARY ================' Cyan
-Write-Result "Critical: $($script:Critical)   Warnings: $($script:WarningCount)   Info: $($script:InfoCount)   Relevant flags: $($script:TotalRelevant)" Gray
+Write-Result '[ ========================================================================== ]' Green
+Write-Result '   [ 05 ]  RISK SUMMARY' Green
+Write-Result "   [ CRITICAL ] $($script:Critical)     [ WARNING ] $($script:WarningCount)     [ INFO ] $($script:InfoCount)     ( relevant flags: $($script:TotalRelevant) )" Gray
+Write-Result ''
 if ($script:Critical -ge 1) {
-    Write-Result "VERDICT: SUSPICIOUS - $($script:Critical) critical finding(s), manual verification required" Red
+    Write-Result "   [ VERDICT ]  SUSPICIOUS ( $($script:Critical) critical finding(s) ) - manual verification required" Red
 }
 elseif ($script:WarningCount -ge 1) {
-    Write-Result "VERDICT: REVIEW - $($script:WarningCount) unusual finding(s), check them by hand" Yellow
+    Write-Result "   [ VERDICT ]  REVIEW ( $($script:WarningCount) unusual finding(s) ) - check them by hand" Yellow
 }
 else {
-    Write-Result 'VERDICT: CLEAN - no suspicious JVM flags detected' Green
+    Write-Result '   [ VERDICT ]  CLEAN ( no suspicious JVM flags detected )' Green
 }
+Write-Result '[ ========================================================================== ]' Green
 Save-Report
