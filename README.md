@@ -21,11 +21,13 @@ agents, redirected game jars, external DLLs and hidden mods.
 | **Launch profile detection** | Shows Vanilla / Fabric / Quilt / Forge-NeoForge from the command line |
 | **Mods inventory** | Scans all known launcher instances (Modrinth, CurseForge, Prism, MultiMC, ATLauncher, .minecraft…) with per-jar SHA256 |
 | **Disguise detection** | Flags jars named like system files (`SYSTEM32.jar`, `svchost.jar`…) |
-| **Crack/cheat marker scan** | Scans the class strings of **every** mod jar for crack signatures (`cracked by`, `648k`, `license key`, `hwid`, `keyauth`) → **CRITICAL**. Catches cracked premium clients hiding under legit names |
+| **Crack/cheat marker scan** | Scans the class strings of **every** mod jar for crack signatures (`cracked by`, `648k`, `license key`, `hwid`, `keyauth`) with word boundaries → **CRITICAL**. Catches cracked premium clients hiding under legit names |
+| **Generic cheat flags** | The class strings of **every** mod jar are matched against ~90 cheat module/feature names (Kill Aura, Auto Crystal, Auto Totem, Chest Stealer, Player ESP, X-Ray, Ping Spoof, USN Journal Cleaner…) **regardless of the client** — works on unknown/private clients too. Case-insensitive, tolerates `Kill Aura` / `killaura` / `kill-aura`. Hits print the class + surrounding string as evidence → **WARNING** (*verify, never proof*) |
 | **Mod identity check** | For flagged jars reads `fabric.mod.json`: shows what the jar *claims* to be (id/name/version/entrypoints), flags **file-name ↔ mod-id mismatch** and hidden nested containers (`MC Bootstrap`, `OptLib Core`…) |
 | **Cheat keyword scan** | Names of known clients/features in args, classpath and mod filenames (a hit = *verify*, never proof) |
 | **Risk verdict** | `CLEAN` / `REVIEW` / `SUSPICIOUS` with critical/warning/info counters |
 | **Report export** | `-OutFile report.txt` (plain) or `-OutFile report.html` (styled standalone HTML, colors preserved) |
+| **String dump** | `-DumpStrings <jar>` exports every readable string of a jar (`entry<TAB>string` per line) to `%TEMP%\<name>.strings.txt` for manual analysis |
 
 ## Usage
 
@@ -38,6 +40,9 @@ agents, redirected game jars, external DLLs and hidden mods.
 
 # check a mods folder that is not in a known launcher path
 .\JVM-Inspector.ps1 -ModsPath "C:\path\to\mods"
+
+# dump all readable strings of a suspect jar for manual analysis
+.\JVM-Inspector.ps1 -DumpStrings "C:\path\to\suspect.jar"
 
 # skip heavy sections
 .\JVM-Inspector.ps1 -SkipMods -SkipModules
