@@ -936,20 +936,18 @@ function Show-ModsInventory {
 
             if ($hasMarker) {
                 $script:Critical++
-                Write-Result '          [ CRITICAL ] crack/cheat marker(s) found inside class strings:' Red
-                foreach ($mk in $hits.Markers) {
-                    Write-Result "              [ $($mk.Marker) ]  <-  $($mk.Class)" Red
-                }
-                Write-Result '          -> cracked/pirated client = cheat + malware risk - DO NOT RUN' Red
+                Write-Result "          [ CRITICAL ] Crack/cheat strings found inside this jar ( $($hits.Markers.Count) ):" Red
+                Write-Result '          -> this is a cracked/pirated client = cheat + malware risk - DO NOT RUN' Red
             }
             if ($hits.Cheats.Count -gt 0) {
                 $script:WarningCount++
-                Write-Result '          [ WARNING ] generic cheat flag(s) - module/feature strings inside classes ( verify ):' Yellow
+                Write-Result "          [ WARNING ] Cheat module strings found inside this jar ( verify - $($hits.Cheats.Count) ):" Yellow
+                $pad = 0
+                foreach ($ch in $hits.Cheats) { if ($ch.Match.Length -gt $pad) { $pad = $ch.Match.Length } }
                 foreach ($ch in $hits.Cheats) {
-                    Write-Result "              [ $($ch.Match) ]  <-  $($ch.Class)" Yellow
-                    Write-Result "                  ( context: $($ch.Context) )" DarkGray
+                    Write-Result ("              {0}  ->  {1}" -f $ch.Match.PadRight($pad + 2), $ch.Class) Yellow
                 }
-                Write-Result '          -> matches cheat module names regardless of client - check this jar' Yellow
+                Write-Result '          -> cheat modules found regardless of client - check this jar' Yellow
             }
 
             # identity deep-dive for flagged jars: what does the jar CLAIM to be?
