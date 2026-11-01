@@ -1,4 +1,4 @@
-﻿$Tolerance = 120
+$Tolerance = 15
 $KeyPath   = "SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"
 $FullKey   = "HKEY_LOCAL_MACHINE\$KeyPath"
 
