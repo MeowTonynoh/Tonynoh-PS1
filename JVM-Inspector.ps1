@@ -941,6 +941,76 @@ function Get-ModMetadata {
     return $meta
 }
 
+# ----------------------------------------------------------------------
+# On-disk injection artifacts in %TEMP% root (always runs, no admin needed):
+# random-named PE files (.tmp with an MZ header = classic cheat DLL dropped
+# by an injector) are flagged even when NOT loaded in any process.
+# ----------------------------------------------------------------------
+function Show-TempArtifacts {
+    $root = $env:TEMP
+    if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path -LiteralPath $root)) { return }
+    $found = @()
+    $files = @(Get-ChildItem -LiteralPath $root -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '\.(tmp|dll|so|exe|bin|dat|ocx|drv)$' })
+    foreach ($f in $files) {
+        # cheap PE check: first 2 bytes must be 'MZ'
+        $isPe = $false
+        try {
+            $fs = [System.IO.File]::OpenRead($f.FullName)
+            try {
+                $b = New-Object byte[] 2
+                if ($fs.Read($b, 0, 2) -eq 2) { $isPe = ($b[0] -eq 0x4D -and $b[1] -eq 0x5A) }
+            }
+            finally { $fs.Close() }
+        } catch { }
+        if (-not $isPe) { continue }
+
+        $sig = 'UnknownError'
+        try { $sig = (Get-AuthenticodeSignature -LiteralPath $f.FullName -ErrorAction Stop).Status.ToString() } catch { }
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
+        # 'QltRgsinNgX'-style: alnum-only, >=8 chars, mixed case + a digit
+        $randomName = ($base -match '^[A-Za-z0-9]{8,}$' -and $base -match '\d' -and
+                       $base -cmatch '[a-z]' -and $base -cmatch '[A-Z]')
+        $sev = 'Info'
+        if ($sig -ne 'Valid') {
+            if ($randomName -or $f.Extension -ieq '.tmp') { $sev = 'Critical' } else { $sev = 'Warning' }
+        }
+        $found += [pscustomobject]@{ File = $f; Sig = $sig; Random = $randomName; Sev = $sev }
+    }
+
+    if ($found.Count -eq 0) {
+        Write-Result '  [ TEMP ] %TEMP% root: no binary injection artifacts on disk ( OK )' DarkGray
+        return
+    }
+    $crit  = @($found | Where-Object { $_.Sev -eq 'Critical' })
+    $warns = @($found | Where-Object { $_.Sev -eq 'Warning' })
+    if ($crit.Count -gt 0) {
+        $script:Critical++
+        Write-Result "  [ CRITICAL ] $($crit.Count) unsigned binary artifact(s) in %TEMP% root - injection droppings:" Red
+        foreach ($h in ($crit | Sort-Object { $_.File.LastWriteTime } -Descending | Select-Object -First 12)) {
+            $extra = ''
+            if ($h.Random) { $extra = '  - random name' }
+            Write-Result "      $($h.File.Name)   ( $([int]($h.File.Length / 1KB)) KB, $($h.File.LastWriteTime.ToString('yyyy-MM-dd')) )  [ $($h.Sig) ]$extra" Red
+        }
+        if ($crit.Count -gt 12) { Write-Result "      ... +$($crit.Count - 12) more" Red }
+        Write-Result '          -> a running game does NOT drop random unsigned PEs here - capture as evidence' Red
+    }
+    if ($warns.Count -gt 0) {
+        $script:WarningCount++
+        Write-Result "  [ REVIEW ] $($warns.Count) unsigned ( non-random ) binary file(s) in %TEMP% root:" Yellow
+        foreach ($h in ($warns | Sort-Object { $_.File.LastWriteTime } -Descending | Select-Object -First 8)) {
+            Write-Result "      $($h.File.Name)   ( $([int]($h.File.Length / 1KB)) KB, $($h.File.LastWriteTime.ToString('yyyy-MM-dd')) )" Yellow
+        }
+        if ($warns.Count -gt 8) { Write-Result "      ... +$($warns.Count - 8) more" Yellow }
+    }
+    $signed = @($found | Where-Object { $_.Sev -eq 'Info' })
+    if ($signed.Count -gt 0) {
+        $names = ($signed | Select-Object -First 3 | ForEach-Object { $_.File.Name }) -join ', '
+        if ($signed.Count -gt 3) { $names += ' ...' }
+        Write-Result "  [ TEMP ] $($signed.Count) signed binary file(s) in %TEMP% root ( installer leftovers - OK ): $names" DarkCyan
+    }
+}
+
 function Show-ModsInventory {
     Write-Result ''
     Write-Result '[ 03 ] ==================== MODS INVENTORY ( known launcher instances ) ====================' Green
@@ -1275,6 +1345,9 @@ else {
     Write-Result ''
     foreach ($proc in $processes) { Show-ProcessReport -Process $proc }
 }
+
+Write-Result ''
+Show-TempArtifacts
 
 if (-not $SkipMods) { Show-ModsInventory }
 
