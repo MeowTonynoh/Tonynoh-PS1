@@ -1028,13 +1028,13 @@ function Show-TempArtifacts {
         }
         if ($crit.Count -gt 12) { Write-Result "      ... +$($crit.Count - 12) more" Red }
         if ($injected -gt 0) {
-            Write-Result "          -> $injected of $($crit.Count) LOADED in live Java = ACTIVE INJECTION ( cheat running NOW )" Red
+            Write-Result "          -> INJECTED in javaw.exe: $injected of $($crit.Count) = ACTIVE INJECTION ( cheat running NOW )" Red
         }
         elseif ($liveJava.Count -eq 0) {
             Write-Result '          -> ON DISK ONLY: no Java process running' DarkGray
         }
         elseif ($script:ModulesReadable) {
-            Write-Result "          -> ON DISK ONLY: not loaded in the $($liveJava.Count) live Java process(es) - loads at next launch" DarkGray
+            Write-Result "          -> ON DISK ONLY: not injected in the running javaw.exe ( file is on disk only )" DarkGray
         }
         else {
             Write-Result '          -> UNKNOWN: run as Administrator to check injection' DarkYellow
