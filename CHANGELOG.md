@@ -3,6 +3,14 @@
 All notable changes to **JVM Inspector** — Minecraft Screenshare Forensics.
 Original script by **Tonynoh** (discord.gg/ssa) · fork & improvements by **ItzMeow80**.
 
+## v3.2
+
+| Change | Details |
+|---|---|
+| **Multi-path values fixed** | `-Djava.library.path="dirA;dirB"` was tested as a single path → always `PATH DOES NOT EXIST` false CRITICAL. Now every `;` segment is checked: all exist → `[ OK ] [ multi-path: 2/2 exist ]`, some missing → `[ REVIEW ] stale entry` (Warning, not Critical) |
+| **Temp DLL whitelist** | `Temp\jna\jna<random>.dll` and `Temp\liblz4-java-<random>.so` are normal self-extractions → moved to `[ DLLS ] TEMP-extracted natives from KNOWN components ( normal )`. Unknown DLLs from TEMP/Downloads (e.g. `Vape421Native.dll`) stay **CRITICAL** |
+| **Trusted clients** | Lunar Client, Badlion Client, Feather, LabyMod added as trusted launchers: parent line → `( trusted launcher )`, their native folders (`badlion_js.dll`…) no longer listed as external DLLs |
+
 ## v3.1
 
 | Change | Details |
