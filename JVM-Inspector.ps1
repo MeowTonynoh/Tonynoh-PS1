@@ -98,6 +98,12 @@ $script:KnownRoots = @(
 $script:TempRoots     = @($env:TEMP, $env:TMP) | Where-Object { $_ }
 $script:DownloadRoots = @("$env:USERPROFILE\Downloads")
 
+# Vendor folders whose loaded DLLs are trusted: MS components living outside
+# %windir% (e.g. Defender's MpOav.dll in ProgramData\Microsoft)
+$script:TrustedVendorRoots = @(
+    "$env:ProgramData\Microsoft"
+)
+
 # Live-process module index (populated by Show-ProcessModules):
 # full module path (lower) -> "name PID" of every live Java process loading it
 $script:LoadedModules   = @{}
@@ -545,7 +551,7 @@ function Show-ProcessModules {
         if (-not $skip -and $JavaDir -and (Test-IsWithin $mp $JavaDir)) { $skip = $true }
         if (-not $skip -and $NativeDir -and (Test-IsWithin $mp $NativeDir)) { $skip = $true }
         if (-not $skip) {
-            foreach ($r in $script:KnownRoots) { if (Test-IsWithin $mp $r) { $skip = $true; break } }
+            foreach ($r in ($script:KnownRoots + $script:TrustedVendorRoots)) { if (Test-IsWithin $mp $r) { $skip = $true; break } }
         }
         if ($skip) { continue }
 
@@ -574,13 +580,16 @@ function Show-ProcessModules {
         }
     }
 
+    if (($knownTemp.Count + $tempHits.Count + $extHits.Count) -gt 0) {
+        Write-Result "  [ DLLS ] modules LOADED in $($Process.Name) ( PID $($Process.ProcessId) ):" DarkCyan
+    }
     if ($knownTemp.Count -gt 0) {
-        Write-Result "  [ DLLS ] TEMP-extracted natives from KNOWN components ( normal ): $($knownTemp.Count)" DarkCyan
-        foreach ($k in $knownTemp) { Write-Result "      $($k.Path)   ( $($k.Label) )" DarkGray }
+        Write-Result "      $($knownTemp.Count) known self-extracted natives ( normal ):" DarkGray
+        foreach ($k in $knownTemp) { Write-Result "          $($k.Path)   ( $($k.Label) )" DarkGray }
     }
     if ($tempHits.Count -gt 0) {
         $script:Critical++
-        Write-Result "  [ CRITICAL ] $($tempHits.Count) UNKNOWN DLL(s) loaded from TEMP/DOWNLOADS - INJECTION SUSPECT:" Red
+        Write-Result "      [ CRITICAL ] $($tempHits.Count) UNKNOWN from TEMP/DOWNLOADS - INJECTION:" Red
         foreach ($t in $tempHits) {
             $sig = 'UnknownError'
             try { $sig = (Get-AuthenticodeSignature -LiteralPath $t -ErrorAction Stop).Status.ToString() } catch { }
@@ -588,7 +597,7 @@ function Show-ProcessModules {
         }
     }
     if ($extHits.Count -gt 0) {
-        Write-Result "  [ DLLS ] outside Java/Windows/launcher folders: $($extHits.Count) ( overlays, vendors - verify )" DarkCyan
+        Write-Result "      $($extHits.Count) outside Java/Windows/launcher folders ( verify overlays/vendors ):" DarkGray
         $shown    = 0
         $unsigned = 0
         foreach ($e in $extHits) {
@@ -606,7 +615,7 @@ function Show-ProcessModules {
         }
         if ($unsigned -gt 0) {
             $script:WarningCount++
-            Write-Result "  [ REVIEW ] $unsigned unsigned/untrusted external DLL(s) loaded in the JVM process" Yellow
+            Write-Result "      [ REVIEW ] $unsigned of them unsigned/untrusted - verify" Yellow
         }
     }
 }
@@ -1005,7 +1014,7 @@ function Show-TempArtifacts {
     $injected = 0
     if ($crit.Count -gt 0) {
         $script:Critical++
-        Write-Result "  [ CRITICAL ] $($crit.Count) unsigned binary artifact(s) in %TEMP% root - injection droppings:" Red
+        Write-Result "  [ CRITICAL ] $($crit.Count) unsigned random binaries in %TEMP% ( injection droppings ):" Red
         foreach ($h in ($crit | Sort-Object { $_.File.LastWriteTime } -Descending | Select-Object -First 12)) {
             $extra = ''
             if ($h.Random) { $extra = '  - random name' }
@@ -1018,23 +1027,22 @@ function Show-TempArtifacts {
             Write-Result "      $($h.File.Name)   ( $([int]($h.File.Length / 1KB)) KB, $($h.File.LastWriteTime.ToString('yyyy-MM-dd')) )  [ $($h.Sig) ]$extra$injectTxt" Red
         }
         if ($crit.Count -gt 12) { Write-Result "      ... +$($crit.Count - 12) more" Red }
-        Write-Result '          -> a running game does NOT drop random unsigned PEs here - capture as evidence' Red
         if ($injected -gt 0) {
-            Write-Result "          -> $injected of $($crit.Count) artifact(s) LOADED in live Java process(es) = ACTIVE INJECTION - the cheat is running NOW" Red
+            Write-Result "          -> $injected of $($crit.Count) LOADED in live Java = ACTIVE INJECTION ( cheat running NOW )" Red
         }
         elseif ($liveJava.Count -eq 0) {
-            Write-Result '          -> ON DISK ONLY: no Java process running - nothing is injected right now' DarkGray
+            Write-Result '          -> ON DISK ONLY: no Java process running' DarkGray
         }
         elseif ($script:ModulesReadable) {
-            Write-Result "          -> ON DISK ONLY: not loaded in the $($liveJava.Count) live Java process(es) - injects at next launch" DarkGray
+            Write-Result "          -> ON DISK ONLY: not loaded in the $($liveJava.Count) live Java process(es) - loads at next launch" DarkGray
         }
         else {
-            Write-Result '          -> injection status UNKNOWN: run as Administrator ( DLL module list unreadable )' DarkYellow
+            Write-Result '          -> UNKNOWN: run as Administrator to check injection' DarkYellow
         }
     }
     if ($warns.Count -gt 0) {
         $script:WarningCount++
-        Write-Result "  [ REVIEW ] $($warns.Count) unsigned ( non-random ) binary file(s) in %TEMP% root:" Yellow
+        Write-Result "  [ REVIEW ] $($warns.Count) unsigned ( non-random ) binaries in %TEMP%:" Yellow
         foreach ($h in ($warns | Sort-Object { $_.File.LastWriteTime } -Descending | Select-Object -First 8)) {
             Write-Result "      $($h.File.Name)   ( $([int]($h.File.Length / 1KB)) KB, $($h.File.LastWriteTime.ToString('yyyy-MM-dd')) )" Yellow
         }
@@ -1048,7 +1056,7 @@ function Show-TempArtifacts {
         }
         $names = $parts -join ', '
         if ($signed.Count -gt 3) { $names += ' ...' }
-        Write-Result "  [ TEMP ] $($signed.Count) known/signed binary file(s) in %TEMP% root ( self-extraction / installer leftovers - OK ): $names" DarkCyan
+        Write-Result "  [ TEMP ] $($signed.Count) known/signed files ( self-extraction - OK ): $names" DarkCyan
     }
 }
 
@@ -1107,50 +1115,47 @@ function Show-ModsInventory {
             else {
                 Write-Result $line DarkGray
             }
-            if ($kw) {
-                Write-Result "          -> keyword '$kw' matched - open and verify this jar" Yellow
-            }
-            if ($isDisguised) {
-                Write-Result '          -> jar disguised as a system/process file name - verify this jar' Yellow
-            }
-
+            # compact findings: exactly one line per finding
             if ($hits.Clients.Count -gt 0) {
                 $script:Critical++
-                Write-Result "          [ CRITICAL ] CHEAT CLIENT detected: $($hits.Clients -join ', ')" Red
-                Write-Result '          -> cheat client hidden inside this jar - malware risk - DO NOT RUN' Red
+                Write-Result "          [ CRITICAL ] CHEAT CLIENT: $($hits.Clients -join ', ')" Red
             }
             elseif ($hasMarker) {
                 $script:Critical++
-                Write-Result "          [ CRITICAL ] Cheat strings found inside this jar ( $($hits.Markers.Count) ):" Red
-                Write-Result '          -> cheat/malware strings - DO NOT RUN' Red
+                Write-Result "          [ CRITICAL ] cheat strings inside ( $($hits.Markers.Count) )" Red
+            }
+            if ($kw -or $isDisguised) {
+                $flags = @()
+                if ($kw) { $flags += "keyword '$kw' in name" }
+                if ($isDisguised) { $flags += 'disguised as system file name' }
+                Write-Result "          [ REVIEW ] $($flags -join ' + ')" Yellow
             }
             if ($hits.Cheats.Count -gt 0) {
                 $script:WarningCount++
-                Write-Result "          [ WARNING ] Cheat module strings found inside this jar ( verify - $($hits.Cheats.Count) ):" Yellow
+                Write-Result "          [ WARNING ] cheat modules ( verify - $($hits.Cheats.Count) ):" Yellow
                 $pad = 0
                 foreach ($ch in $hits.Cheats) { if ($ch.Match.Length -gt $pad) { $pad = $ch.Match.Length } }
                 foreach ($ch in $hits.Cheats) {
                     Write-Result ("              {0}  ->  {1}" -f $ch.Match.PadRight($pad + 2), $ch.Class) Yellow
                 }
-                Write-Result '          -> cheat modules found regardless of client - check this jar' Yellow
             }
 
-            # identity deep-dive for flagged jars: what does the jar CLAIM to be?
+            # identity of flagged jars: what does it CLAIM to be?
             if ($isFlagged) {
                 $md = Get-ModMetadata -JarPath $jar.FullName
                 if ($md.Id) {
-                    Write-Result "          -> claims to be: id=$($md.Id)  name=$($md.Name)  version=$($md.Version)" DarkGray
-                    if ($md.Entrypoints) { Write-Result "          -> entrypoints: $($md.Entrypoints)" DarkGray }
-                    if (-not $baseName.ToLowerInvariant().Contains($md.Id.ToLowerInvariant())) {
-                        $script:WarningCount++
-                        Write-Result "          [ MISMATCH ] file name does not match mod id '$($md.Id)' - jar is disguised" Yellow
-                    }
+                    $mismatch = (-not $baseName.ToLowerInvariant().Contains($md.Id.ToLowerInvariant()))
+                    $idNotes  = @()
+                    if ($mismatch) { $script:WarningCount++; $idNotes += 'file name does not match id' }
+                    if ($md.Containers.Count -gt 0) { $idNotes += 'nested: ' + ($md.Containers -join ', ') }
+                    $tagTxt  = if ($mismatch) { '[ MISMATCH ]' } else { '[ INFO ]' }
+                    $noteTxt = ''
+                    if ($idNotes.Count -gt 0) { $noteTxt = '   ( ' + ($idNotes -join '; ') + ' )' }
+                    $lineColor = if ($mismatch) { 'Yellow' } else { 'DarkGray' }
+                    Write-Result "          $tagTxt id=$($md.Id)  name=$($md.Name)  v$($md.Version)$noteTxt" $lineColor
                 }
                 elseif ($md.Error) {
-                    Write-Result "          -> identity unreadable: $($md.Error)" DarkYellow
-                }
-                if ($md.Containers.Count -gt 0) {
-                    Write-Result ('          -> hidden nested containers: ' + ($md.Containers -join ', ')) DarkGray
+                    Write-Result "          [ REVIEW ] identity unreadable: $($md.Error)" DarkYellow
                 }
             }
             $shown++
@@ -1211,23 +1216,20 @@ function Show-ProcessReport {
             $eq  = $raw.IndexOf('=')
             if ($eq -gt 0) { $raw = $raw.Substring(0, $eq) }
             $agent = Get-AgentInfo -RawPath $raw
-            $details.Add(@{ Text = "     -> file: $($agent.Path)" + $(if ($agent.Exists) { "  ($($agent.SizeKB) KB)" } else { '' }); Color = 'Gray' })
             if (-not $agent.Exists) {
                 $sev = New-Severity 'Critical' 'java agent jar missing/deleted while process runs'
-                $details.Add(@{ Text = "     -> $($agent.Error)"; Color = 'Red' })
+                $details.Add(@{ Text = "          $($agent.Error)"; Color = 'Red' })
             }
             elseif ($agent.IsKnown) {
                 $sev = New-Severity 'OK' "known launcher agent: $($agent.KnownName)"
-                if ($agent.Premain) { $details.Add(@{ Text = "     -> Premain-Class: $($agent.Premain)"; Color = 'Gray' }) }
-                if ($agent.Packages.Count) { $details.Add(@{ Text = '     -> packages: ' + ($agent.Packages -join ', '); Color = 'Gray' }) }
-                $details.Add(@{ Text = "     -> [ KNOWN LEGITIMATE AGENT ] $($agent.KnownName)"; Color = 'Green' })
+                $details.Add(@{ Text = "          known agent: $($agent.KnownName)   ( $($agent.SizeKB) KB )"; Color = 'Green' })
             }
             else {
                 $sev = New-Severity 'Critical' 'UNKNOWN java agent - manual verification required'
-                if ($agent.Premain) { $details.Add(@{ Text = "     -> Premain-Class: $($agent.Premain)"; Color = 'Yellow' }) }
-                if ($agent.Packages.Count) { $details.Add(@{ Text = '     -> packages: ' + ($agent.Packages -join ', '); Color = 'Yellow' }) }
-                if ($agent.Error) { $details.Add(@{ Text = "     -> $($agent.Error)"; Color = 'Red' }) }
-                $details.Add(@{ Text = '     -> [ UNKNOWN AGENT ] not a known launcher agent - open the jar and verify its origin'; Color = 'Red' })
+                $aInfo = "          file: $($agent.Path)   ( $($agent.SizeKB) KB )"
+                if ($agent.Premain) { $aInfo += "   premain: $($agent.Premain)" }
+                $details.Add(@{ Text = $aInfo; Color = 'Yellow' })
+                $details.Add(@{ Text = '          not a known launcher agent - verify its origin'; Color = 'Red' })
             }
         }
         # ---- -D system property with a path value -----------------------
@@ -1236,16 +1238,19 @@ function Show-ProcessReport {
             $key  = $arg.Substring(2, $eq - 2)
             $val  = $arg.Substring($eq + 1)
             if ($script:PathKeys -contains $key) {
-                $worst = 'OK'
+                $worst = 'OK'; $worstLabel = ''; $worstColor = 'DarkGray'
                 foreach ($rawPath in ($val -split ',')) {
                     if ([string]::IsNullOrWhiteSpace($rawPath)) { continue }
-                    $pi = Get-PathInfo -RawPath $rawPath
-                    $details.Add(@{ Text = "     -> $($pi.Path)"; Color = 'Gray' })
-                    $details.Add(@{ Text = "        $($pi.Label)"; Color = $pi.Color })
-                    if ($pi.Severity -eq 'Critical' -and $worst -ne 'Critical') { $worst = 'Critical' }
-                    elseif ($pi.Severity -eq 'Warning' -and $worst -eq 'OK')   { $worst = 'Warning' }
+                    $pi      = Get-PathInfo -RawPath $rawPath
+                    $piRank  = switch ($pi.Severity) { 'Critical' { 2 } 'Warning' { 1 } default { 0 } }
+                    $curRank = switch ($worst)        { 'Critical' { 2 } 'Warning' { 1 } default { 0 } }
+                    if (($piRank -gt $curRank) -or (-not $worstLabel)) {
+                        $worst = $pi.Severity; $worstLabel = $pi.Label; $worstColor = $pi.Color
+                    }
                     if ($key -eq 'java.library.path' -and $pi.Exists) { $nativeDir = $pi.Path }
                 }
+                # one summary line: the path itself is already visible in the arg
+                if ($worstLabel) { $details.Add(@{ Text = "          $worstLabel"; Color = $worstColor }) }
                 if ($worst -eq 'Critical' -and $sev.Level -ne 'Critical') {
                     $sev = New-Severity 'Critical' 'referenced path problem (missing or in Downloads)'
                 }
@@ -1260,11 +1265,17 @@ function Show-ProcessReport {
         if ($kw) {
             $script:WarningCount++
             $argKeyword = $true
-            $details.Add(@{ Text = "     -> [ ! ] keyword '$kw' matched - verify manually ( keyword is NOT proof )"; Color = 'Yellow' })
+            $details.Add(@{ Text = "          keyword '$kw' in argument - verify ( keyword is NOT proof )"; Color = 'Yellow' })
         }
 
-        Write-Result ('  ' + $arg) (Get-LevelColor $sev.Level)
-        if ($sev.Text) { Write-Result "     // $($sev.Text)" (Get-LevelColor $sev.Level) }
+        $tagTxt = switch ($sev.Level) {
+            'Critical' { '[ CRITICAL ]' }
+            'Warning'  { '[ REVIEW ]' }
+            'Info'     { '[ INFO ]' }
+            'OK'       { '[ OK ]' }
+            default    { '[ - ]' }
+        }
+        Write-Result ("  {0} {1}" -f $tagTxt, $arg) (Get-LevelColor $sev.Level)
         foreach ($d in $details) { Write-Result $d.Text $d.Color }
         Add-Hit $sev.Level
     }
