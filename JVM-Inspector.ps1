@@ -98,6 +98,11 @@ $script:KnownRoots = @(
 $script:TempRoots     = @($env:TEMP, $env:TMP) | Where-Object { $_ }
 $script:DownloadRoots = @("$env:USERPROFILE\Downloads")
 
+# Live-process module index (populated by Show-ProcessModules):
+# full module path (lower) -> "name PID" of every live Java process loading it
+$script:LoadedModules   = @{}
+$script:ModulesReadable = $false
+
 # Keyword scan: names of known cheat clients / cheat features.
 # A hit is NEVER proof - it only means "open this jar and verify".
 $script:BadKeywords = @(
@@ -132,6 +137,7 @@ $script:KnownTempNatives = @{
 $script:KnownTempNativeRx = @(
     @{ Rx = '^jna\d+$';          Label = 'JNA native stub (self-extracted - normal)' }
     @{ Rx = '^liblz4-java-\d+$'; Label = 'lz4-java native (self-extracted - normal)' }
+    @{ Rx = '^io_grpc_netty_shaded_'; Label = 'grpc-java native (self-extracted - normal)' }
 )
 
 function Get-TempNativeLabel {
@@ -511,6 +517,7 @@ function Show-ProcessModules {
     try {
         $netProc = [System.Diagnostics.Process]::GetProcessById($Process.ProcessId)
         $modules = @($netProc.Modules)
+        $script:ModulesReadable = $true
     }
     catch {
         Write-Result '  [ DLLS ] cannot read the module list ( try running as Administrator )' DarkYellow
@@ -526,6 +533,13 @@ function Show-ProcessModules {
     foreach ($m in $modules) {
         $mp = $m.FileName
         if ([string]::IsNullOrWhiteSpace($mp)) { continue }
+        # index every loaded module so the TEMP artifact scan can answer
+        # "is this droppping actually injected into the game right now?"
+        $mpKey = $mp.ToLowerInvariant()
+        if (-not $script:LoadedModules.ContainsKey($mpKey)) {
+            $script:LoadedModules[$mpKey] = New-Object System.Collections.Generic.List[string]
+        }
+        $script:LoadedModules[$mpKey].Add("$($Process.Name) PID $($Process.ProcessId)")
         $skip = $false
         if (Test-IsWithin $mp $env:windir) { $skip = $true }
         if (-not $skip -and $JavaDir -and (Test-IsWithin $mp $JavaDir)) { $skip = $true }
@@ -971,11 +985,13 @@ function Show-TempArtifacts {
         # 'QltRgsinNgX'-style: alnum-only, >=8 chars, mixed case + a digit
         $randomName = ($base -match '^[A-Za-z0-9]{8,}$' -and $base -match '\d' -and
                        $base -cmatch '[a-z]' -and $base -cmatch '[A-Z]')
+        # known self-extractions (jna / lz4 / grpc) are never droppings
+        $knownLabel = Get-TempNativeLabel $f.FullName
         $sev = 'Info'
-        if ($sig -ne 'Valid') {
+        if (-not $knownLabel -and $sig -ne 'Valid') {
             if ($randomName -or $f.Extension -ieq '.tmp') { $sev = 'Critical' } else { $sev = 'Warning' }
         }
-        $found += [pscustomobject]@{ File = $f; Sig = $sig; Random = $randomName; Sev = $sev }
+        $found += [pscustomobject]@{ File = $f; Sig = $sig; Random = $randomName; Sev = $sev; Label = $knownLabel }
     }
 
     if ($found.Count -eq 0) {
@@ -984,16 +1000,37 @@ function Show-TempArtifacts {
     }
     $crit  = @($found | Where-Object { $_.Sev -eq 'Critical' })
     $warns = @($found | Where-Object { $_.Sev -eq 'Warning' })
+    # cross-check: is any artifact LOADED in a live Java process right now?
+    $liveJava = @(Get-Process -Name javaw, java -ErrorAction SilentlyContinue)
+    $injected = 0
     if ($crit.Count -gt 0) {
         $script:Critical++
         Write-Result "  [ CRITICAL ] $($crit.Count) unsigned binary artifact(s) in %TEMP% root - injection droppings:" Red
         foreach ($h in ($crit | Sort-Object { $_.File.LastWriteTime } -Descending | Select-Object -First 12)) {
             $extra = ''
             if ($h.Random) { $extra = '  - random name' }
-            Write-Result "      $($h.File.Name)   ( $([int]($h.File.Length / 1KB)) KB, $($h.File.LastWriteTime.ToString('yyyy-MM-dd')) )  [ $($h.Sig) ]$extra" Red
+            $injectTxt = ''
+            $key = $h.File.FullName.ToLowerInvariant()
+            if ($script:LoadedModules.ContainsKey($key)) {
+                $injected++
+                $injectTxt = '  [ INJECTED: ' + ($script:LoadedModules[$key] -join ', ') + ' ]'
+            }
+            Write-Result "      $($h.File.Name)   ( $([int]($h.File.Length / 1KB)) KB, $($h.File.LastWriteTime.ToString('yyyy-MM-dd')) )  [ $($h.Sig) ]$extra$injectTxt" Red
         }
         if ($crit.Count -gt 12) { Write-Result "      ... +$($crit.Count - 12) more" Red }
         Write-Result '          -> a running game does NOT drop random unsigned PEs here - capture as evidence' Red
+        if ($injected -gt 0) {
+            Write-Result "          -> $injected of $($crit.Count) artifact(s) LOADED in live Java process(es) = ACTIVE INJECTION - the cheat is running NOW" Red
+        }
+        elseif ($liveJava.Count -eq 0) {
+            Write-Result '          -> ON DISK ONLY: no Java process running - nothing is injected right now' DarkGray
+        }
+        elseif ($script:ModulesReadable) {
+            Write-Result "          -> ON DISK ONLY: not loaded in the $($liveJava.Count) live Java process(es) - injects at next launch" DarkGray
+        }
+        else {
+            Write-Result '          -> injection status UNKNOWN: run as Administrator ( DLL module list unreadable )' DarkYellow
+        }
     }
     if ($warns.Count -gt 0) {
         $script:WarningCount++
@@ -1005,9 +1042,13 @@ function Show-TempArtifacts {
     }
     $signed = @($found | Where-Object { $_.Sev -eq 'Info' })
     if ($signed.Count -gt 0) {
-        $names = ($signed | Select-Object -First 3 | ForEach-Object { $_.File.Name }) -join ', '
+        $parts = @()
+        foreach ($h in ($signed | Select-Object -First 3)) {
+            $parts += $h.File.Name + $(if ($h.Label) { " ( $($h.Label) )" } else { '' })
+        }
+        $names = $parts -join ', '
         if ($signed.Count -gt 3) { $names += ' ...' }
-        Write-Result "  [ TEMP ] $($signed.Count) signed binary file(s) in %TEMP% root ( installer leftovers - OK ): $names" DarkCyan
+        Write-Result "  [ TEMP ] $($signed.Count) known/signed binary file(s) in %TEMP% root ( self-extraction / installer leftovers - OK ): $names" DarkCyan
     }
 }
 
