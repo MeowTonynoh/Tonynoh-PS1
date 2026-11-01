@@ -10,6 +10,7 @@ Original script by **Tonynoh** (discord.gg/ssa) · fork & improvements by **ItzM
 | **Multi-path values fixed** | `-Djava.library.path="dirA;dirB"` was tested as a single path → always `PATH DOES NOT EXIST` false CRITICAL. Now every `;` segment is checked: all exist → `[ OK ] [ multi-path: 2/2 exist ]`, some missing → `[ REVIEW ] stale entry` (Warning, not Critical) |
 | **Temp DLL whitelist** | `Temp\jna\jna<random>.dll` and `Temp\liblz4-java-<random>.so` are normal self-extractions → moved to `[ DLLS ] TEMP-extracted natives from KNOWN components ( normal )`. Unknown DLLs from TEMP/Downloads (e.g. `Vape421Native.dll`) stay **CRITICAL** |
 | **Trusted clients** | Lunar Client, Badlion Client, Feather, LabyMod added as trusted launchers: parent line → `( trusted launcher )`, their native folders (`badlion_js.dll`…) no longer listed as external DLLs |
+| **%TEMP% on-disk scan** | Always runs (no admin, no live game needed): scans the `%TEMP%` root for binary injection artifacts — random-named unsigned PEs (`.tmp` with an `MZ` header) → `[ CRITICAL ] injection droppings`. Caught 10 copies of the same unsigned 13 MB cheat DLL re-dropped under random names |
 
 ## v3.1
 
