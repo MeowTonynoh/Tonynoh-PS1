@@ -88,6 +88,11 @@ $script:KnownRoots = @(
     "$env:USERPROFILE\curseforge"
     "$env:APPDATA\.techniclauncher"
     "$env:LOCALAPPDATA\Packages\Microsoft.4297127D64EC6_8wekyb3d8bbwe"
+    "$env:LOCALAPPDATA\Programs\Lunar Client"
+    "$env:LOCALAPPDATA\Programs\Badlion Client"
+    "$env:APPDATA\Badlion Client"
+    "$env:APPDATA\.feather"
+    "$env:APPDATA\.labymod"
 )
 
 $script:TempRoots     = @($env:TEMP, $env:TMP) | Where-Object { $_ }
@@ -121,11 +126,22 @@ $script:KnownTempNatives = @{
     'jnidispatch'  = 'JNA runtime extraction'
 }
 
+# Pattern-based temp natives: hashed filenames can't be matched exactly.
+# JNA extracts 'jna<random>.dll', lz4-java extracts 'liblz4-java-<random>.so'
+# into %TEMP% on every run - normal self-extraction, NOT injection.
+$script:KnownTempNativeRx = @(
+    @{ Rx = '^jna\d+$';          Label = 'JNA native stub (self-extracted - normal)' }
+    @{ Rx = '^liblz4-java-\d+$'; Label = 'lz4-java native (self-extracted - normal)' }
+)
+
 function Get-TempNativeLabel {
     param([string]$DllPath)
     $name = [System.IO.Path]::GetFileNameWithoutExtension($DllPath)
     if ([string]::IsNullOrEmpty($name)) { return $null }
     if ($script:KnownTempNatives.ContainsKey($name)) { return $script:KnownTempNatives[$name] }
+    foreach ($k in $script:KnownTempNativeRx) {
+        if ($name -match $k.Rx) { return $k.Label }
+    }
     return $null
 }
 
@@ -300,6 +316,30 @@ function Get-PathInfo {
         $info.Category = 'Missing'; $info.Label = 'EMPTY PATH'; $info.Color = 'Red'; $info.Severity = 'Critical'
         return $info
     }
+
+    # Multi-path values (';' separated, e.g. java.library.path with two native
+    # dirs): the whole string never exists as one path - check each segment.
+    $multiNote = ''
+    $segments = @(($p -split ';') | ForEach-Object { $_.Trim().Trim('"') } | Where-Object { $_ })
+    if ($segments.Count -gt 1) {
+        $okSegs   = @($segments | Where-Object { Test-Path -LiteralPath $_ })
+        $missSegs = @($segments | Where-Object { -not (Test-Path -LiteralPath $_) })
+        if ($missSegs.Count -gt 0) {
+            # some segments exist -> stale leftover entry, not an injection:
+            # a running game obviously loads the native dirs that DO exist
+            $info.Exists  = ($okSegs.Count -gt 0)
+            $info.Category = 'Partial'
+            $short = ($missSegs | ForEach-Object {
+                if ($_.Length -gt 60) { '...' + $_.Substring($_.Length - 57) } else { $_ }
+            }) -join '; '
+            $info.Label    = "$($missSegs.Count) of $($segments.Count) path(s) missing ( stale entry ): $short"
+            $info.Color    = 'Yellow'; $info.Severity = 'Warning'
+            return $info
+        }
+        $p = $okSegs[0]
+        $multiNote = " [ multi-path: $($okSegs.Count)/$($segments.Count) exist ]"
+    }
+
     if (-not (Test-Path -LiteralPath $p)) {
         $info.Category = 'Missing'; $info.Label = 'PATH DOES NOT EXIST (while process is running!)'
         $info.Color = 'Red'; $info.Severity = 'Critical'
@@ -311,7 +351,7 @@ function Get-PathInfo {
     foreach ($r in $script:TempRoots) {
         if (Test-IsWithin $info.Path $r) {
             $info.Category = 'Temp'
-            $info.Label    = 'inside TEMP - launchers do extract files here, verify the source'
+            $info.Label    = 'inside TEMP - launchers do extract files here, verify the source' + $multiNote
             $info.Color    = 'Yellow'; $info.Severity = 'Warning'
             return $info
         }
@@ -319,7 +359,7 @@ function Get-PathInfo {
     foreach ($r in $script:DownloadRoots) {
         if (Test-IsWithin $info.Path $r) {
             $info.Category = 'Downloads'
-            $info.Label    = 'inside Downloads - very unusual for a running game'
+            $info.Label    = 'inside Downloads - very unusual for a running game' + $multiNote
             $info.Color    = 'Red'; $info.Severity = 'Critical'
             return $info
         }
@@ -327,13 +367,13 @@ function Get-PathInfo {
     foreach ($r in $script:KnownRoots) {
         if (Test-IsWithin $info.Path $r) {
             $info.Category = 'Launcher'
-            $info.Label    = 'inside known launcher folder ( OK )'
+            $info.Label    = 'inside known launcher folder ( OK )' + $multiNote
             $info.Color    = 'Green'; $info.Severity = 'OK'
             return $info
         }
     }
     $info.Category = 'Other'
-    $info.Label    = 'custom location outside known launchers - verify'
+    $info.Label    = 'custom location outside known launchers - verify' + $multiNote
     $info.Color    = 'Yellow'; $info.Severity = 'Warning'
     return $info
 }
@@ -434,7 +474,8 @@ function Get-ParentInfo {
     $launcherParents = @(
         'modrinth app.exe', 'curseforge.exe', 'minecraftlauncher.exe', 'minecraft.exe',
         'prismlauncher.exe', 'multimc.exe', 'atlauncher.exe', 'gdlauncher.exe',
-        'techniclauncher.exe', 'serverlauncher.exe', 'steam.exe', 'javaw.exe', 'java.exe'
+        'techniclauncher.exe', 'serverlauncher.exe', 'steam.exe', 'javaw.exe', 'java.exe',
+        'lunar client.exe', 'badlion client.exe', 'feather client.exe', 'labymod.exe'
     )
     $consoleParents = @(
         'explorer.exe', 'powershell.exe', 'pwsh.exe', 'cmd.exe',
