@@ -1654,11 +1654,15 @@ if ($Decompile) {
     Write-Result '[ ================================================================== ]' Green
     Write-Result ''
     try {
-        $jarFull = (Resolve-Path -LiteralPath $Decompile).Path
-        if (Test-Path -LiteralPath $jarFull -PathType Container) {
-            Write-Result "  [ ! ] -Decompile expects a JAR file, not a folder: $jarFull" Red
+        if (-not (Test-Path -LiteralPath $Decompile)) {
+            Write-Result "  [ ! ] file not found: $Decompile" Red
+            Write-Result '      pass the FULL path of an existing .jar file' DarkGray
+        }
+        elseif (Test-Path -LiteralPath $Decompile -PathType Container) {
+            Write-Result "  [ ! ] -Decompile expects a JAR file, not a folder: $Decompile" Red
         }
         else {
+            $jarFull = (Resolve-Path -LiteralPath $Decompile).Path
             Write-Result "  [ SCAN ] jar : $jarFull" DarkCyan
             $hits = Find-JarStringHits -JarPath $jarFull -Full
             $scan = Get-AgentClassScan -JarPath $jarFull
@@ -1749,11 +1753,15 @@ if ($DumpStrings) {
     Write-Result ''
     Write-Result '[ 04 ] ============================ STRING DUMP ( manual analysis ) ===========================' Green
     try {
-        $jarFull = (Resolve-Path -LiteralPath $DumpStrings).Path
-        if (Test-Path -LiteralPath $jarFull -PathType Container) {
-            Write-Result "  [ ! ] DumpStrings expects a JAR file, not a folder: $jarFull" Red
+        if (-not (Test-Path -LiteralPath $DumpStrings)) {
+            Write-Result "  [ ! ] file not found: $DumpStrings" Red
+            Write-Result '      pass the FULL path of an existing .jar file' DarkGray
+        }
+        elseif (Test-Path -LiteralPath $DumpStrings -PathType Container) {
+            Write-Result "  [ ! ] DumpStrings expects a JAR file, not a folder: $DumpStrings" Red
         }
         else {
+            $jarFull = (Resolve-Path -LiteralPath $DumpStrings).Path
             $outPath = Join-Path $env:TEMP (([IO.Path]::GetFileNameWithoutExtension($jarFull)) + '.strings.txt')
             $d = Export-JarStrings -JarPath $jarFull -OutPath $outPath
             Write-Result "  [ OK ] dumped $($d.Strings) readable string(s) from $($d.Entries) entrie(s):" Green
