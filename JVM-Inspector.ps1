@@ -461,6 +461,104 @@ function Get-AgentInfo {
 }
 
 # ----------------------------------------------------------------------
+# Automatic bytecode analysis of an agent jar - the "decompiler pass"
+# without JD-GUI: parses each class file's constant pool to list the
+# game classes it references (net.minecraft / com.mojang) and the
+# Instrumentation rewrite APIs it uses (retransform/redefine/...).
+# Zero dependencies, runs offline on any machine.
+# ----------------------------------------------------------------------
+function Get-AgentClassScan {
+    param([string]$JarPath, [int]$MaxClasses = 400)
+    $scan = [pscustomobject]@{
+        Classes  = 0
+        McRefs   = 0
+        McSample = @()
+        Hooks    = @()
+        Error    = ''
+    }
+    $hookNames = @('redefineClasses', 'retransformClasses', 'retransformModules',
+                   'appendToSystemClassLoaderSearch', 'appendToBootstrapClassLoaderSearch')
+    $utf8Enc = [System.Text.Encoding]::UTF8
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($JarPath)
+        try {
+            foreach ($e in $zip.Entries) {
+                if ($scan.Classes -ge $MaxClasses) { break }
+                if ($e.FullName -notlike '*.class') { continue }
+                if ($e.Length -lt 40 -or $e.Length -gt 2MB) { continue }
+                $ms = New-Object System.IO.MemoryStream
+                $s  = $e.Open(); $s.CopyTo($ms); $s.Close()
+                $b  = $ms.ToArray(); $ms.Dispose()
+                try {
+                    # class files are BIG-endian: magic CA FE BA BE at offset 0,
+                    # minor(2) major(2), then u16 cp_count, then the constant pool
+                    if ($b[0] -ne 0xCA -or $b[1] -ne 0xFE -or $b[2] -ne 0xBA -or $b[3] -ne 0xBE) { continue }
+                    $cpCount = ($b[8] -shl 8) -bor $b[9]
+                    if ($cpCount -lt 3) { continue }
+                    $utf8     = New-Object 'string[]' $cpCount
+                    $classIdx = New-Object System.Collections.Generic.List[int]
+                    $pos  = 10
+                    $len  = $b.Length
+                    $bad  = $false
+                    $i    = 1
+                    while ($i -lt $cpCount) {
+                        if ($pos -ge $len) { $bad = $true; break }
+                        $tag = $b[$pos]; $pos++
+                        switch ($tag) {
+                            1  { if ($pos + 2 -gt $len) { $bad = $true; break }
+                                 $l = ($b[$pos] -shl 8) -bor $b[$pos+1]; $pos += 2
+                                 if ($pos + $l -gt $len) { $bad = $true; break }
+                                 $utf8[$i] = $utf8Enc.GetString($b, $pos, $l); $pos += $l }
+                            3  { $pos += 4 }
+                            4  { $pos += 4 }
+                            5  { $pos += 8; $i++ }    # long takes 2 cp slots
+                            6  { $pos += 8; $i++ }    # double takes 2 cp slots
+                            7  { if ($pos + 2 -gt $len) { $bad = $true; break }
+                                 $classIdx.Add(($b[$pos] -shl 8) -bor $b[$pos+1]); $pos += 2 }
+                            8  { $pos += 2 }
+                            9  { $pos += 4 }
+                            10 { $pos += 4 }
+                            11 { $pos += 4 }
+                            12 { $pos += 4 }
+                            15 { $pos += 3 }
+                            16 { $pos += 2 }
+                            17 { $pos += 4 }
+                            18 { $pos += 4 }
+                            19 { $pos += 2 }
+                            20 { $pos += 2 }
+                            default { $bad = $true }   # unknown tag = malformed
+                        }
+                        if ($bad) { break }
+                        $i++
+                    }
+                    if ($bad) { continue }
+                    $scan.Classes++
+                    foreach ($ci in $classIdx) {
+                        $n = $utf8[$ci]
+                        if (-not $n) { continue }
+                        if ($n -like 'net/minecraft/*' -or $n -like 'com/mojang/*') {
+                            $scan.McRefs++
+                            if ($scan.McSample.Count -lt 3 -and $scan.McSample -notcontains $n) {
+                                $scan.McSample += $n
+                            }
+                        }
+                    }
+                    foreach ($u in $utf8) {
+                        if ($u -and ($hookNames -contains $u) -and ($scan.Hooks -notcontains $u)) {
+                            $scan.Hooks += $u
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+        finally { $zip.Dispose() }
+    }
+    catch { $scan.Error = $_.Exception.Message }
+    return $scan
+}
+
+# ----------------------------------------------------------------------
 # Parent process + launch profile + DLLs
 # ----------------------------------------------------------------------
 function Get-ParentInfo {
@@ -1210,7 +1308,7 @@ function Show-ProcessReport {
         $sev     = Get-ArgSeverity -Arg $arg
         $details = New-Object System.Collections.Generic.List[object]
 
-        # ---- javaagent: deep jar analysis -------------------------------
+        # ---- javaagent: deep jar analysis (manifest + strings + bytecode) ----
         if ($arg -like '-javaagent:*') {
             $raw = $arg.Substring('-javaagent:'.Length)
             $eq  = $raw.IndexOf('=')
@@ -1220,16 +1318,53 @@ function Show-ProcessReport {
                 $sev = New-Severity 'Critical' 'java agent jar missing/deleted while process runs'
                 $details.Add(@{ Text = "          $($agent.Error)"; Color = 'Red' })
             }
-            elseif ($agent.IsKnown) {
-                $sev = New-Severity 'OK' "known launcher agent: $($agent.KnownName)"
-                $details.Add(@{ Text = "          known agent: $($agent.KnownName)   ( $($agent.SizeKB) KB )"; Color = 'Green' })
-            }
             else {
-                $sev = New-Severity 'Critical' 'UNKNOWN java agent - manual verification required'
-                $aInfo = "          file: $($agent.Path)   ( $($agent.SizeKB) KB )"
-                if ($agent.Premain) { $aInfo += "   premain: $($agent.Premain)" }
-                $details.Add(@{ Text = $aInfo; Color = 'Yellow' })
-                $details.Add(@{ Text = '          not a known launcher agent - verify its origin'; Color = 'Red' })
+                # automatic analysis: full string scan + constant-pool bytecode scan
+                $agentHits = Find-JarStringHits  -JarPath $agent.Path
+                $agentScan = Get-AgentClassScan  -JarPath $agent.Path
+                $clsTxt = ''
+                if ($agentScan.Classes -gt 0) { $clsTxt = ", $($agentScan.Classes) classes analyzed" }
+
+                # cheat traces: markers / cheat clients / cheat modules in the jar
+                $traceParts = @()
+                if ($agentHits.Clients.Count) { $traceParts += 'cheat client: ' + ($agentHits.Clients -join '/') }
+                if ($agentHits.Markers.Count) { $traceParts += "markers: $($agentHits.Markers.Count)" }
+                if ($agentHits.Cheats.Count)  { $traceParts += "cheat modules: $($agentHits.Cheats.Count)" }
+                # rewrite evidence: game-class references + Instrumentation rewrite APIs
+                $rwParts = @()
+                if ($agentScan.McRefs -gt 0)  { $rwParts += "net.minecraft/com.mojang refs: $($agentScan.McRefs)" }
+                if ($agentScan.Hooks.Count)   { $rwParts += ($agentScan.Hooks -join ', ') }
+
+                if ($agent.IsKnown -and $traceParts.Count -eq 0) {
+                    # legit known agent (Theseus/Spark): green + neutral evidence line
+                    $sev = New-Severity 'OK' "known launcher agent: $($agent.KnownName)"
+                    $details.Add(@{ Text = "          known agent: $($agent.KnownName)   ( $($agent.SizeKB) KB$clsTxt )"; Color = 'Green' })
+                    if ($rwParts.Count) {
+                        $details.Add(@{ Text = '          [ BYTECODE ] ' + ($rwParts -join ' + ') + ' ( normal for this agent )'; Color = 'DarkGray' })
+                    }
+                }
+                else {
+                    if ($agent.IsKnown) {
+                        $sev = New-Severity 'Critical' "known agent ($($agent.KnownName)) contains cheat traces"
+                        $details.Add(@{ Text = "          known agent: $($agent.KnownName)   ( $($agent.SizeKB) KB$clsTxt ) - BUT:"; Color = 'Yellow' })
+                    }
+                    else {
+                        $sev = New-Severity 'Critical' 'UNKNOWN java agent - manual verification required'
+                        $aInfo = "          file: $($agent.Path)   ( $($agent.SizeKB) KB$clsTxt )"
+                        if ($agent.Premain) { $aInfo += "   premain: $($agent.Premain)" }
+                        $details.Add(@{ Text = $aInfo; Color = 'Yellow' })
+                        $details.Add(@{ Text = '          not a known launcher agent - verify its origin'; Color = 'Red' })
+                    }
+                    if ($traceParts.Count) {
+                        $details.Add(@{ Text = '          [ CRITICAL ] ' + ($traceParts -join ' + '); Color = 'Red' })
+                    }
+                    if ($rwParts.Count) {
+                        $details.Add(@{ Text = '          [ REWRITE ] ' + ($rwParts -join ' + '); Color = 'Red' })
+                    }
+                    elseif (-not $traceParts.Count) {
+                        $details.Add(@{ Text = "          [ SCAN ] $clsTxt - no cheat traces found, origin still unverified"; Color = 'DarkGray' })
+                    }
+                }
             }
         }
         # ---- -D system property with a path value -----------------------
