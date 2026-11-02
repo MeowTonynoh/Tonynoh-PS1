@@ -804,7 +804,7 @@ function Show-ProcessModules {
         Write-Result "  [ DLLS ] modules LOADED in $($Process.Name) ( PID $($Process.ProcessId) ):" DarkCyan
     }
     if ($knownTemp.Count -gt 0) {
-        Write-Result "      $($knownTemp.Count) known self-extracted natives ( normal ):" DarkGray
+        Write-Result "      [ OK ] $($knownTemp.Count) known self-extracted natives - normal, NOT flagged:" Green
         foreach ($k in $knownTemp) { Write-Result "          $($k.Path)   ( $($k.Label) )" DarkGray }
     }
     if ($tempHits.Count -gt 0) {
