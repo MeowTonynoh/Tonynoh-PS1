@@ -9,6 +9,10 @@
         the class strings of EVERY mod jar, regardless of the client
         (works on unknown/private clients) -> class + context evidence
       * -DumpStrings <jar>: full printable-string export for manual analysis
+      * -Decompile <jar>: real decompiler pass (CFR -> JD-compatible Java
+        sources) + cheat-trace scan of every generated source line
+      * Automatic full-string scan of -javaagent jars: every string of every
+        entry is checked for cheat traces and the hits are printed in red
       * MEOW-style output: numbered sections, [ TAG ] severity labels,
         separators and verdict box
     What's new in v2:
@@ -39,11 +43,21 @@
     Skip the loaded-DLL check.
 .PARAMETER Hash
     Add short SHA256 hashes to the mods inventory (proves which jar was there).
+.PARAMETER Decompile
+    Standalone decompiler mode: decompile the given jar to Java sources
+    (CFR, openable with JD-GUI from java-decompiler.github.io) and scan every
+    source line for cheat traces - printed in red under the finding.
+.PARAMETER NoDecompile
+    Disable the automatic decompiler pass on unknown -javaagent jars
+    (it is on by default; sources land in %TEMP%\jvi-decompile-*).
 .EXAMPLE
     .\JVM-Inspector.ps1 -OutFile .\ss-report.txt -Hash
 .EXAMPLE
     .\JVM-Inspector.ps1 -DumpStrings "C:\path\to\suspect.jar"
     Dump every readable string of a jar to %TEMP%\<name>.strings.txt for manual analysis.
+.EXAMPLE
+    .\JVM-Inspector.ps1 -Decompile "C:\path\to\suspect.jar"
+    Decompile to sources and list every cheat string found, with file:line, in red.
 .NOTES
     Original by Tonynoh - discord.gg/ssa
     Fork + improvements by ItzMeow80
@@ -56,7 +70,9 @@ param(
     [switch]$SkipMods,
     [switch]$SkipModules,
     [switch]$Hash,
-    [string]$DumpStrings
+    [string]$DumpStrings,
+    [string]$Decompile,
+    [switch]$NoDecompile
 )
 
 # ----------------------------------------------------------------------
@@ -67,6 +83,8 @@ $script:Critical      = 0
 $script:WarningCount  = 0
 $script:InfoCount     = 0
 $script:TotalRelevant = 0
+$script:NoDecompile   = [bool]$NoDecompile
+$script:CfrTried      = $false
 
 try { Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop } catch { }
 
@@ -559,6 +577,110 @@ function Get-AgentClassScan {
 }
 
 # ----------------------------------------------------------------------
+# Real decompiler pass: CFR -> plain .java sources (JD-GUI compatible,
+# java-decompiler.github.io) + cheat-trace scan of EVERY source line.
+# Needs any JRE; CFR is fetched once to %TEMP%\jvi-cfr.jar and cached.
+# ----------------------------------------------------------------------
+function Find-JavaExe {
+    $cmd = Get-Command java.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($pat in @("$env:ProgramFiles\*\bin\java.exe", "${env:ProgramFiles(x86)}\*\bin\java.exe")) {
+        $j = Get-Item -Path $pat -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($j) { return $j.FullName }
+    }
+    foreach ($root in @("$env:LOCALAPPDATA\Programs\Modrinth App", "$env:APPDATA\ModrinthApp",
+                        "$env:LOCALAPPDATA\Modrinth App", "$env:USERPROFILE\.jdks")) {
+        if (Test-Path -LiteralPath $root) {
+            $j = Get-ChildItem -LiteralPath $root -Recurse -Depth 4 -Filter java.exe -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+            if ($j) { return $j.FullName }
+        }
+    }
+    return ''
+}
+
+# Scan every line of every generated .java source for cheat traces.
+# Returns pscustomobject { Value; File; Line; Context } (up to $Max).
+function Find-SourceTraces {
+    param([string]$DirPath, [int]$Max = 8)
+    # regexes are lazily built by Find-JarStringHits (always called first)
+    if (-not $script:CheatRx) { return @() }
+    $hits = @()
+    $javaFiles = @(Get-ChildItem -LiteralPath $DirPath -Recurse -Filter *.java -ErrorAction SilentlyContinue)
+    foreach ($f in $javaFiles) {
+        if ($hits.Count -ge $Max) { break }
+        try { $text = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop } catch { continue }
+        if (-not $text) { continue }
+        $rel = $f.FullName.Substring($DirPath.Length).TrimStart('\')
+        $lines = $text -split "`r?`n"
+        for ($li = 0; $li -lt $lines.Count; $li++) {
+            if ($hits.Count -ge $Max) { break }
+            $line = $lines[$li]
+            if ($line.Length -gt 240) { $line = $line.Substring(0, 240) }
+            $hit = $null
+            $low  = $script:StripRx.Replace($line, '').ToLowerInvariant()
+            $gate = $line.IndexOf('ESP', [StringComparison]::Ordinal) -ge 0
+            if (-not $gate) {
+                foreach ($g in $script:CheatGates) {
+                    if ($low.IndexOf($g, [StringComparison]::Ordinal) -ge 0) { $gate = $true; break }
+                }
+            }
+            if ($gate) {
+                $mt = $script:CheatRx.Match($line)
+                if ($mt.Success) { $hit = $mt.Value }
+            }
+            if (-not $hit) {
+                foreach ($mk in $script:MarkerRx.Keys) {
+                    if ($script:MarkerRx[$mk].IsMatch($line)) { $hit = $mk; break }
+                }
+            }
+            if ($hit) {
+                $ctx = $line.Trim()
+                if ($ctx.Length -gt 160) { $ctx = $ctx.Substring(0, 160) }
+                $hits += [pscustomobject]@{ Value = $hit; File = $rel; Line = ($li + 1); Context = $ctx }
+            }
+        }
+    }
+    return $hits
+}
+
+# Decompile a jar with CFR. Returns { Lines; Dir; Traces; Error }.
+function Invoke-AgentDecompile {
+    param([string]$JarPath, [switch]$Quiet)
+    $res = [pscustomobject]@{ Dir = ''; Traces = @(); Error = '' }
+    if ($script:NoDecompile) { $res.Error = 'disabled'; return $res }
+    $java = Find-JavaExe
+    if (-not $java) { $res.Error = 'no java.exe found ( any JRE works, or pass -NoDecompile )'; return $res }
+    $cfr = Join-Path $env:TEMP 'jvi-cfr.jar'
+    if (-not (Test-Path -LiteralPath $cfr)) {
+        if ($script:CfrTried) { $res.Error = 'CFR decompiler unavailable ( download failed earlier in this run )'; return $res }
+        $script:CfrTried = $true
+        try {
+            if (-not $Quiet) { Write-Result '  [ DECOMPILE ] fetching CFR decompiler ( one-time, 2 MB )...' DarkGray }
+            Invoke-WebRequest -Uri 'https://repo1.maven.org/maven2/org/benf/cfr/0.152/cfr-0.152.jar' `
+                              -OutFile $cfr -UseBasicParsing -TimeoutSec 30 | Out-Null
+        }
+        catch {
+            Remove-Item -LiteralPath $cfr -Force -ErrorAction SilentlyContinue
+            $res.Error = 'cannot fetch CFR (offline): ' + $_.Exception.Message
+            return $res
+        }
+    }
+    $outDir = Join-Path $env:TEMP ('jvi-decompile-' + ([IO.Path]::GetRandomFileName() -replace '\..*', ''))
+    try {
+        & $java -jar $cfr $JarPath --outputdir $outDir --silent true 2>$null | Out-Null
+    }
+    catch {
+        $res.Error = 'decompiler failed: ' + $_.Exception.Message
+        return $res
+    }
+    if (-not (Test-Path -LiteralPath $outDir)) { $res.Error = 'decompiler produced no output'; return $res }
+    $res.Dir    = $outDir
+    $res.Traces = @(Find-SourceTraces -DirPath $outDir)
+    return $res
+}
+
+# ----------------------------------------------------------------------
 # Parent process + launch profile + DLLs
 # ----------------------------------------------------------------------
 function Get-ParentInfo {
@@ -834,7 +956,7 @@ function Get-ModsDirectories {
 #                                  generic flags that work on ANY client - private
 #                                  ones included. Verify, never proof.)
 function Find-JarStringHits {
-    param([string]$JarPath)
+    param([string]$JarPath, [switch]$Full)
 
     # Regexes built once (script scope) for speed:
     #  - markers get word boundaries -> 'hwid' no longer matches inside 'withWidth'
@@ -901,6 +1023,9 @@ function Find-JarStringHits {
         $script:StripRx = [regex]::new('[ _\-]', [Text.RegularExpressions.RegexOptions]::Compiled)
     }
     $markers = @($script:MarkerRx.Keys)
+    # -Full = check EVERY string of EVERY entry (classes + resources, no
+    # early exit): used for -javaagent jars where evidence completeness matters
+    $maxC = if ($Full) { 12 } else { 6 }
 
     $foundM = @{}   # marker -> first class file that contains it
     $foundC = @{}   # matched text -> pscustomobject { Match; Class; Context }
@@ -910,7 +1035,7 @@ function Find-JarStringHits {
         try {
             $enc = [System.Text.Encoding]::GetEncoding(28591)
             foreach ($e in $zip.Entries) {
-                if ($foundM.Count -ge $markers.Count -and $foundC.Count -ge 6) { break }
+                if (-not $Full -and $foundM.Count -ge $markers.Count -and $foundC.Count -ge $maxC) { break }
                 # known cheat client branding (e.g. assets/.../bloom_logo.png)
                 if ($foundT.Count -lt 3) {
                     $en = $e.FullName.ToLowerInvariant()
@@ -920,7 +1045,8 @@ function Find-JarStringHits {
                         }
                     }
                 }
-                if ($e.FullName -notlike '*.class') { continue }
+                if ($e.Length -eq 0 -or $e.Length -gt 2MB) { continue }
+                if ($e.FullName -notlike '*.class' -and -not $Full) { continue }
                 $ms = New-Object System.IO.MemoryStream
                 $s  = $e.Open(); $s.CopyTo($ms); $s.Close()
                 $str = $enc.GetString($ms.ToArray())
@@ -947,7 +1073,7 @@ function Find-JarStringHits {
                     }
                 }
 
-                if ($foundC.Count -lt 6) {
+                if ($foundC.Count -lt $maxC) {
                     # gate first (cheap): normalized copy + IndexOf per phrase.
                     # 'esp' alone is excluded from the phrase gates (it matches
                     # inside normal words) - standalone ESP is gated separately
@@ -970,7 +1096,7 @@ function Find-JarStringHits {
                             $foundC[$key] = [pscustomobject]@{
                                 Match = $mt.Value; Class = $e.FullName; Context = $ctx
                             }
-                            if ($foundC.Count -ge 6) { break }
+                            if ($foundC.Count -ge $maxC) { break }
                         }
                     }
                 }
@@ -1218,9 +1344,12 @@ function Show-ModsInventory {
                 $script:Critical++
                 Write-Result "          [ CRITICAL ] CHEAT CLIENT: $($hits.Clients -join ', ')" Red
             }
-            elseif ($hasMarker) {
-                $script:Critical++
-                Write-Result "          [ CRITICAL ] cheat strings inside ( $($hits.Markers.Count) )" Red
+            if ($hasMarker) {
+                if ($hits.Clients.Count -eq 0) { $script:Critical++ }
+                Write-Result "          [ CRITICAL ] suspicious strings inside ( $($hits.Markers.Count) ) - every hit below:" Red
+                foreach ($mk in ($hits.Markers | Select-Object -First 6)) {
+                    Write-Result "              '$($mk.Marker)'   in   $($mk.Class)" Red
+                }
             }
             if ($kw -or $isDisguised) {
                 $flags = @()
@@ -1319,26 +1448,23 @@ function Show-ProcessReport {
                 $details.Add(@{ Text = "          $($agent.Error)"; Color = 'Red' })
             }
             else {
-                # automatic analysis: full string scan + constant-pool bytecode scan
-                $agentHits = Find-JarStringHits  -JarPath $agent.Path
-                $agentScan = Get-AgentClassScan  -JarPath $agent.Path
-                $clsTxt = ''
-                if ($agentScan.Classes -gt 0) { $clsTxt = ", $($agentScan.Classes) classes analyzed" }
+                # automatic analysis: FULL string scan (every string of every
+                # entry) + constant-pool bytecode scan + decompiler pass
+                $agentHits = Find-JarStringHits -JarPath $agent.Path -Full
+                $agentScan = Get-AgentClassScan -JarPath $agent.Path
+                $clsNote = if ($agentScan.Classes -gt 0) { "$($agentScan.Classes) classes analyzed" } else { 'no classes readable' }
 
                 # cheat traces: markers / cheat clients / cheat modules in the jar
-                $traceParts = @()
-                if ($agentHits.Clients.Count) { $traceParts += 'cheat client: ' + ($agentHits.Clients -join '/') }
-                if ($agentHits.Markers.Count) { $traceParts += "markers: $($agentHits.Markers.Count)" }
-                if ($agentHits.Cheats.Count)  { $traceParts += "cheat modules: $($agentHits.Cheats.Count)" }
+                $hasTrace = ($agentHits.Clients.Count + $agentHits.Markers.Count + $agentHits.Cheats.Count) -gt 0
                 # rewrite evidence: game-class references + Instrumentation rewrite APIs
                 $rwParts = @()
                 if ($agentScan.McRefs -gt 0)  { $rwParts += "net.minecraft/com.mojang refs: $($agentScan.McRefs)" }
                 if ($agentScan.Hooks.Count)   { $rwParts += ($agentScan.Hooks -join ', ') }
 
-                if ($agent.IsKnown -and $traceParts.Count -eq 0) {
+                if ($agent.IsKnown -and -not $hasTrace) {
                     # legit known agent (Theseus/Spark): green + neutral evidence line
                     $sev = New-Severity 'OK' "known launcher agent: $($agent.KnownName)"
-                    $details.Add(@{ Text = "          known agent: $($agent.KnownName)   ( $($agent.SizeKB) KB$clsTxt )"; Color = 'Green' })
+                    $details.Add(@{ Text = "          known agent: $($agent.KnownName)   ( $($agent.SizeKB) KB, $clsNote )"; Color = 'Green' })
                     if ($rwParts.Count) {
                         $details.Add(@{ Text = '          [ BYTECODE ] ' + ($rwParts -join ' + ') + ' ( normal for this agent )'; Color = 'DarkGray' })
                     }
@@ -1346,23 +1472,44 @@ function Show-ProcessReport {
                 else {
                     if ($agent.IsKnown) {
                         $sev = New-Severity 'Critical' "known agent ($($agent.KnownName)) contains cheat traces"
-                        $details.Add(@{ Text = "          known agent: $($agent.KnownName)   ( $($agent.SizeKB) KB$clsTxt ) - BUT:"; Color = 'Yellow' })
+                        $details.Add(@{ Text = "          known agent: $($agent.KnownName)   ( $($agent.SizeKB) KB, $clsNote ) - BUT:"; Color = 'Yellow' })
                     }
                     else {
                         $sev = New-Severity 'Critical' 'UNKNOWN java agent - manual verification required'
-                        $aInfo = "          file: $($agent.Path)   ( $($agent.SizeKB) KB$clsTxt )"
+                        $aInfo = "          file: $($agent.Path)   ( $($agent.SizeKB) KB, $clsNote )"
                         if ($agent.Premain) { $aInfo += "   premain: $($agent.Premain)" }
                         $details.Add(@{ Text = $aInfo; Color = 'Yellow' })
                         $details.Add(@{ Text = '          not a known launcher agent - verify its origin'; Color = 'Red' })
                     }
-                    if ($traceParts.Count) {
-                        $details.Add(@{ Text = '          [ CRITICAL ] ' + ($traceParts -join ' + '); Color = 'Red' })
+                    if ($agentHits.Clients.Count) {
+                        $details.Add(@{ Text = "          [ CRITICAL ] cheat client: $($agentHits.Clients -join ', ')"; Color = 'Red' })
+                    }
+                    if ($agentHits.Markers.Count -or $agentHits.Cheats.Count) {
+                        $nStr = $agentHits.Markers.Count + $agentHits.Cheats.Count
+                        $details.Add(@{ Text = "          [ CRITICAL ] suspicious strings ( $nStr ): every hit listed below"; Color = 'Red' })
+                        foreach ($mk in ($agentHits.Markers | Select-Object -First 6)) {
+                            $details.Add(@{ Text = "              '$($mk.Marker)'   in   $($mk.Class)"; Color = 'Red' })
+                        }
+                        foreach ($ch in ($agentHits.Cheats | Select-Object -First 6)) {
+                            $details.Add(@{ Text = "              '$($ch.Match)'   in   $($ch.Class)"; Color = 'Red' })
+                        }
                     }
                     if ($rwParts.Count) {
                         $details.Add(@{ Text = '          [ REWRITE ] ' + ($rwParts -join ' + '); Color = 'Red' })
                     }
-                    elseif (-not $traceParts.Count) {
-                        $details.Add(@{ Text = "          [ SCAN ] $clsTxt - no cheat traces found, origin still unverified"; Color = 'DarkGray' })
+                    elseif (-not $hasTrace) {
+                        $details.Add(@{ Text = "          [ SCAN ] $clsNote - no cheat traces found, origin still unverified"; Color = 'DarkGray' })
+                    }
+                    # real decompiler pass -> JD-compatible sources + source traces in red
+                    $dec = Invoke-AgentDecompile -JarPath $agent.Path -Quiet
+                    if ($dec.Error -and $dec.Error -ne 'disabled') {
+                        $details.Add(@{ Text = "          [ DECOMPILE ] skipped: $($dec.Error)"; Color = 'DarkYellow' })
+                    }
+                    elseif ($dec.Dir) {
+                        $details.Add(@{ Text = "          [ DECOMPILE ] JD-compatible sources -> $($dec.Dir)"; Color = 'Cyan' })
+                        foreach ($t in ($dec.Traces | Select-Object -First 8)) {
+                            $details.Add(@{ Text = "              $($t.File):$($t.Line)  '$($t.Value)'"; Color = 'Red' })
+                        }
                     }
                 }
             }
@@ -1499,6 +1646,65 @@ function ConvertTo-HtmlReport {
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
+# --- Standalone decompiler mode: -Decompile <jar> -----------------------
+if ($Decompile) {
+    Clear-Host
+    Write-Result '[ ================================================================== ]' Green
+    Write-Result '   JVM INSPECTOR v3   -   DECOMPILER MODE ( JD-style source scan )' Green
+    Write-Result '[ ================================================================== ]' Green
+    Write-Result ''
+    try {
+        $jarFull = (Resolve-Path -LiteralPath $Decompile).Path
+        if (Test-Path -LiteralPath $jarFull -PathType Container) {
+            Write-Result "  [ ! ] -Decompile expects a JAR file, not a folder: $jarFull" Red
+        }
+        else {
+            Write-Result "  [ SCAN ] jar : $jarFull" DarkCyan
+            $hits = Find-JarStringHits -JarPath $jarFull -Full
+            $scan = Get-AgentClassScan -JarPath $jarFull
+            Write-Result "  [ SCAN ] $($scan.Classes) classes analyzed   ( net.minecraft/com.mojang refs: $($scan.McRefs) )" DarkGray
+            if ($scan.Hooks.Count) { Write-Result "  [ SCAN ] rewrite APIs: $($scan.Hooks -join ', ')" DarkGray }
+            if ($hits.Clients.Count) {
+                Write-Result "  [ CRITICAL ] cheat client: $($hits.Clients -join ', ')" Red
+            }
+            if ($hits.Markers.Count -or $hits.Cheats.Count) {
+                $nStr = $hits.Markers.Count + $hits.Cheats.Count
+                Write-Result "  [ CRITICAL ] suspicious strings ( $nStr ) - every hit below:" Red
+                foreach ($mk in ($hits.Markers | Select-Object -First 10)) {
+                    Write-Result "      '$($mk.Marker)'   in   $($mk.Class)" Red
+                }
+                foreach ($ch in ($hits.Cheats | Select-Object -First 10)) {
+                    Write-Result "      '$($ch.Match)'   in   $($ch.Class)   ( $($ch.Context) )" Red
+                }
+            }
+            if (-not ($hits.Markers.Count -or $hits.Cheats.Count -or $hits.Clients.Count)) {
+                Write-Result '  [ OK ] no cheat traces in any string of this jar' Green
+            }
+            Write-Result ''
+            $dec = Invoke-AgentDecompile -JarPath $jarFull
+            if ($dec.Error) {
+                Write-Result "  [ DECOMPILE ] skipped: $($dec.Error)" DarkYellow
+            }
+            else {
+                Write-Result "  [ DECOMPILE ] JD-compatible sources -> $($dec.Dir)" Cyan
+                Write-Result '      ( browse them with JD-GUI: https://java-decompiler.github.io/ )' DarkGray
+                foreach ($t in ($dec.Traces | Select-Object -First 12)) {
+                    Write-Result "      $($t.File):$($t.Line)  '$($t.Value)'" Red
+                    Write-Result "          $($t.Context)" DarkGray
+                }
+                if (-not $dec.Traces.Count) {
+                    Write-Result '  [ OK ] no cheat traces in the decompiled sources' Green
+                }
+            }
+        }
+    }
+    catch {
+        Write-Result "  [ ! ] Decompile failed: $($_.Exception.Message)" Red
+    }
+    Write-Result ''
+    return
+}
+
 Clear-Host
 Write-Result '[ ================================================================== ]' Green
 Write-Result '   JVM INSPECTOR v3   -   Minecraft Screenshare Forensics' Green
